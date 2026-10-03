@@ -74,7 +74,7 @@ function unsafeUrlMessage(err: unknown, what: string): string {
   if (err instanceof UnsafeUrlError && (err.reason === 'dns' || err.reason === 'dns-timeout')) {
     return `ไม่พบเซิร์ฟเวอร์ปลายทางของ${what} กรุณาตรวจสอบที่อยู่แล้วลองใหม่อีกครั้ง`
   }
-  return `ปลายทางของ${what}ต้องเป็นเซิร์ฟเวอร์สาธารณะบนอินเทอร์เน็ต (ไม่รองรับที่อยู่ภายในเครือข่าย)`
+  return `ปลายทางของ ${what} ต้องเป็นเซิร์ฟเวอร์สาธารณะบนอินเทอร์เน็ต (ไม่รองรับที่อยู่ภายในเครือข่าย)`
 }
 
 /** SSRF check: the URL's host must resolve to public addresses only. */
