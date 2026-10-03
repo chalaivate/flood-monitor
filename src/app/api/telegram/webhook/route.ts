@@ -3,7 +3,7 @@ import { telegramSendMessage } from '@/lib/notify/telegram'
 import { safeEqual } from '@/lib/server/auth'
 import { handleChatText, handleUnlink, replyStatus } from '@/lib/server/bots'
 import { lateFetch } from '@/lib/server/context'
-import { json, jsonError } from '@/lib/server/http'
+import { HttpError, json, jsonError, readTextCapped } from '@/lib/server/http'
 import { BOT_TEXT } from '@/lib/server/linking'
 import { log } from '@/lib/server/log'
 import { getStore } from '@/lib/store'
@@ -36,8 +36,13 @@ export async function POST(req: Request): Promise<Response> {
   const given = req.headers.get('x-telegram-bot-api-secret-token') ?? ''
   if (!safeEqual(given, secret)) return jsonError(401, 'ไม่มีสิทธิ์เข้าถึง')
 
-  const raw = await req.text()
-  if (raw.length > MAX_BODY) return jsonError(413, 'ข้อมูลมีขนาดใหญ่เกินไป')
+  let raw: string
+  try {
+    raw = await readTextCapped(req, MAX_BODY)
+  } catch (err) {
+    if (err instanceof HttpError) return jsonError(err.status, err.message)
+    throw err
+  }
   let update: TgUpdate
   try {
     update = JSON.parse(raw) as TgUpdate

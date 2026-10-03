@@ -3,7 +3,7 @@ import { lineReply, lineText } from '@/lib/notify/line'
 import { verifyLineSignature } from '@/lib/server/auth'
 import { handleChatText, handleUnlink } from '@/lib/server/bots'
 import { lateFetch } from '@/lib/server/context'
-import { json, jsonError } from '@/lib/server/http'
+import { HttpError, json, jsonError, readTextCapped } from '@/lib/server/http'
 import { BOT_TEXT } from '@/lib/server/linking'
 import { log } from '@/lib/server/log'
 import { getStore } from '@/lib/store'
@@ -46,9 +46,18 @@ export async function POST(req: Request): Promise<Response> {
   const token = config.LINE_CHANNEL_ACCESS_TOKEN
   if (!secret || !token) return jsonError(503, 'ระบบยังไม่ได้ตั้งค่า LINE')
 
-  const raw = await req.text()
-  if (raw.length > MAX_BODY) return jsonError(413, 'ข้อมูลมีขนาดใหญ่เกินไป')
-  if (!verifyLineSignature(secret, raw, req.headers.get('x-line-signature'))) {
+  // Cheap checks before touching the body: an unsigned request is refused outright and
+  // the body is read with a hard cap (declared Content-Length first, then while streaming).
+  const signature = req.headers.get('x-line-signature')
+  if (!signature) return jsonError(401, 'ลายเซ็นไม่ถูกต้อง')
+  let raw: string
+  try {
+    raw = await readTextCapped(req, MAX_BODY)
+  } catch (err) {
+    if (err instanceof HttpError) return jsonError(err.status, err.message)
+    throw err
+  }
+  if (!verifyLineSignature(secret, raw, signature)) {
     return jsonError(401, 'ลายเซ็นไม่ถูกต้อง')
   }
 

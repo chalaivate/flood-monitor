@@ -11,21 +11,25 @@ import {
   verifyManageToken,
 } from '@/lib/server/auth'
 import {
-  extractLinkCodes,
   generateLinkCode,
+  isLinkCodeExpired,
   LINK_CODE_ALPHABET,
+  LINK_CODE_TTL_MS,
+  parseLinkCode,
   randomLinkCode,
   validateChannelTarget,
 } from '@/lib/server/channels'
-import { clientIp, readJson, zodMessage } from '@/lib/server/http'
+import { HttpError, clientIp, readBodyCapped, readJson, zodMessage } from '@/lib/server/http'
+import { linkByCode } from '@/lib/server/linking'
 import { bangkokStamp } from '@/lib/server/log'
-import { patchPlace } from '@/lib/server/places'
+import { assertPublicUrl, isPrivateAddress, isPublicHostname, isRedirect, type LookupFn } from '@/lib/server/net'
+import { alertSettingsChanged, patchPlace } from '@/lib/server/places'
 import { runPollCycle, runRelayCycle, startLoop } from '@/lib/server/poller'
 import { maskTarget, toPublicChannel, toPublicPlace } from '@/lib/server/public'
 import { clearRadarCache, getRadarImage, isJpeg } from '@/lib/server/radar-proxy'
-import { RateLimiter } from '@/lib/server/rate-limit'
+import { enforceClientLimit, ipBucket, LIMITS, RateLimiter, rateLimiter } from '@/lib/server/rate-limit'
 import { ChannelInputSchema, IngestPayloadSchema, PlaceInputSchema } from '@/lib/server/validation'
-import { cachedWeather, clearWeatherCache, weatherKey } from '@/lib/server/weather-cache'
+import { cachedWeather, clearWeatherCache, snapToWeatherGrid, weatherKey } from '@/lib/server/weather-cache'
 import type { SourceAdapter } from '@/lib/sources/types'
 import { SqliteStore } from '@/lib/store/sqlite'
 import type { Channel, Place, WeatherNow } from '@/lib/types'
@@ -33,6 +37,22 @@ import { DEFAULT_FREEBOARD } from '@/lib/types'
 import { ZodError } from 'zod'
 
 const now = '2026-10-03T04:00:00.000Z'
+
+/** Fake DNS: known public names resolve to public addresses, `*.evil.example` to private ones. */
+const fakeLookup: LookupFn = async (host) => {
+  const table: Record<string, string[]> = {
+    'ntfy.example.org': ['203.0.114.10'],
+    'fcm.googleapis.com': ['142.250.4.95', '2404:6800:4003:c00::5f'],
+    'discord.com': ['162.159.128.233'],
+    'rebind.evil.example': ['93.184.216.34', '10.0.0.5'],
+    'loopback.evil.example': ['127.0.0.1'],
+    'metadata.evil.example': ['169.254.169.254'],
+    'v6.evil.example': ['::ffff:192.168.1.1'],
+  }
+  const hit = table[host]
+  if (!hit) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: 'ENOTFOUND' })
+  return hit
+}
 
 describe('auth helpers', () => {
   it('generates 43-char base64url manage tokens and verifies their sha256', () => {
@@ -113,6 +133,27 @@ describe('PlaceInput validation', () => {
     expect(toPublicPlace(p)).not.toHaveProperty('manageTokenHash')
   })
 
+  it('detects edits that change what a place is alerted about', () => {
+    const place: Place = {
+      id: 'p1',
+      ...PlaceInputSchema.parse({ label: 'บ้าน', lat: 13.72, lng: 100.75 }),
+      manageTokenHash: 'h',
+      createdAt: now,
+      updatedAt: now,
+    }
+    const changed = (patch: Record<string, unknown>) => alertSettingsChanged(place, patchPlace(place, patch))
+    expect(changed({ label: 'คอนโด' })).toBe(false)
+    expect(changed({})).toBe(false)
+    expect(changed({ radiusKm: place.radiusKm })).toBe(false)
+    expect(changed({ notifyMinLevel: 'watch' })).toBe(true)
+    expect(changed({ lat: 13.73 })).toBe(true)
+    expect(changed({ radiusKm: 5 })).toBe(true)
+    expect(changed({ maxStations: 2 })).toBe(true)
+    expect(changed({ rapidRiseCm: 20 })).toBe(true)
+    expect(changed({ freeboard: { watch: 0.8, warning: 0.3, critical: 0.1 } })).toBe(true)
+    expect(changed({ rain: { watch: 40, warning: 90.1, critical: 150 } })).toBe(true)
+  })
+
   it('validates channel and ingest payloads', () => {
     expect(ChannelInputSchema.safeParse({ type: 'sms' }).success).toBe(false)
     expect(ChannelInputSchema.parse({ type: 'webpush', target: { endpoint: 'x' } }).type).toBe('webpush')
@@ -139,9 +180,9 @@ describe('PlaceInput validation', () => {
 })
 
 describe('link codes and channel targets', () => {
-  it('uses 6 unambiguous characters', () => {
+  it('uses 8 unambiguous characters', () => {
     expect(LINK_CODE_ALPHABET).not.toMatch(/[IO01]/)
-    for (let i = 0; i < 200; i++) expect(randomLinkCode()).toMatch(/^[A-HJ-NP-Z2-9]{6}$/)
+    for (let i = 0; i < 200; i++) expect(randomLinkCode()).toMatch(/^[A-HJ-NP-Z2-9]{8}$/)
   })
 
   it('retries until the code is unused', async () => {
@@ -163,42 +204,99 @@ describe('link codes and channel targets', () => {
     store.close()
   })
 
-  it('extracts codes from chat text case-insensitively', () => {
-    expect(extractLinkCodes('รหัส ab2cd3 ครับ')).toEqual(['AB2CD3'])
-    expect(extractLinkCodes('/start XY7Z9Q STATUS')).toEqual(['XY7Z9Q', 'STATUS'])
-    expect(extractLinkCodes('code: AB1CD3')).toEqual([]) // contains "1": not in the alphabet
-    expect(extractLinkCodes('สวัสดี')).toEqual([])
+  it('accepts only a message that is one code (optionally after "รหัส"), case-insensitively', () => {
+    expect(parseLinkCode('ab2cd3ef')).toBe('AB2CD3EF')
+    expect(parseLinkCode('  XY7Z9QWE \n')).toBe('XY7Z9QWE')
+    expect(parseLinkCode('รหัส ab2cd3ef')).toBe('AB2CD3EF')
+    expect(parseLinkCode('รหัสเชื่อมต่อ: AB2CD3EF')).toBe('AB2CD3EF')
+    expect(parseLinkCode('code AB2CD3EF')).toBe('AB2CD3EF')
+    // Several tokens in one message used to be tried one by one: now nothing is.
+    expect(parseLinkCode('AB2CD3EF XY7Z9QWE')).toBeNull()
+    expect(parseLinkCode('รหัส AB2CD3EF ครับ')).toBeNull()
+    expect(parseLinkCode('AB1CD3EF')).toBeNull() // "1" is not in the alphabet
+    expect(parseLinkCode('AB2CD3')).toBeNull() // old 6-character format
+    expect(parseLinkCode('AB2CD3EFG')).toBeNull()
+    expect(parseLinkCode('สวัสดี')).toBeNull()
+    expect(parseLinkCode(Array.from({ length: 300 }, () => 'ABCDEFGH').join(' '))).toBeNull()
   })
 
-  it('validates each channel type', () => {
-    expect(validateChannelTarget('ntfy', 'fm-home_01')).toEqual({ ok: true, target: 'fm-home_01' })
-    expect(validateChannelTarget('ntfy', 'https://ntfy.example.org/my-topic/')).toEqual({ ok: true, target: 'https://ntfy.example.org/my-topic' })
-    expect(validateChannelTarget('ntfy', 'http://ntfy.example.org/t').ok).toBe(false)
-    expect(validateChannelTarget('ntfy', 'https://127.0.0.1/t').ok).toBe(false)
-    expect(validateChannelTarget('ntfy', 'https://localhost/t').ok).toBe(false)
-    expect(validateChannelTarget('ntfy', 'has space').ok).toBe(false)
-    expect(validateChannelTarget('ntfy', undefined)).toEqual({ ok: false, error: 'กรุณาระบุชื่อหัวข้อ (topic) ของ ntfy' })
+  it('expires pending codes 60 minutes after the channel was created', () => {
+    expect(LINK_CODE_TTL_MS).toBe(3_600_000)
+    const createdAt = '2026-10-03T04:00:00.000Z'
+    expect(isLinkCodeExpired({ createdAt }, new Date('2026-10-03T04:59:59.000Z'))).toBe(false)
+    expect(isLinkCodeExpired({ createdAt }, new Date('2026-10-03T05:00:00.000Z'))).toBe(true)
+    expect(isLinkCodeExpired({ createdAt: 'garbage' }, new Date(createdAt))).toBe(true)
+  })
 
-    expect(validateChannelTarget('email', ' Someone@Example.COM ')).toEqual({ ok: true, target: 'someone@example.com' })
-    expect(validateChannelTarget('email', 'not-an-email').ok).toBe(false)
-    expect(validateChannelTarget('email', 'a@b').ok).toBe(false)
+  it('links a pending chat channel only with a live code of the right type', async () => {
+    const store = new SqliteStore(':memory:')
+    const place: Place = {
+      id: 'p1',
+      ...PlaceInputSchema.parse({ label: 'บ้าน', lat: 13.72, lng: 100.75 }),
+      manageTokenHash: 'h',
+      createdAt: now,
+      updatedAt: now,
+    }
+    await store.createPlace(place)
+    await store.addChannel({ id: 'c1', placeId: 'p1', type: 'telegram', target: '', verified: false, linkCode: 'AB2CD3EF', createdAt: now })
+    const at = (min: number) => new Date(Date.parse(now) + min * 60_000)
+    expect(await linkByCode(store, 'line', 'AB2CD3EF', 'U1', at(1))).toEqual({ status: 'not_found' })
+    expect(await linkByCode(store, 'telegram', 'ZZZZ2222', '42', at(1))).toEqual({ status: 'not_found' })
+    expect(await linkByCode(store, 'telegram', 'AB2CD3EF', '42', at(61))).toEqual({ status: 'expired' })
+    expect((await store.listChannels('p1'))[0]).toMatchObject({ verified: false, linkCode: 'AB2CD3EF' })
+    const ok = await linkByCode(store, 'telegram', 'AB2CD3EF', '42', at(59))
+    expect(ok).toMatchObject({ status: 'linked', channel: { target: '42', verified: true, linkCode: null } })
+    store.close()
+  })
+
+  it('validates each channel type', async () => {
+    const v = (type: Channel['type'], raw: unknown) => validateChannelTarget(type, raw, { lookup: fakeLookup })
+    expect(await v('ntfy', 'fm-home_01')).toEqual({ ok: true, target: 'fm-home_01' })
+    expect(await v('ntfy', 'https://ntfy.example.org/my-topic/')).toEqual({ ok: true, target: 'https://ntfy.example.org/my-topic' })
+    expect((await v('ntfy', 'http://ntfy.example.org/t')).ok).toBe(false)
+    expect((await v('ntfy', 'https://127.0.0.1/t')).ok).toBe(false)
+    expect((await v('ntfy', 'https://localhost/t')).ok).toBe(false)
+    expect((await v('ntfy', 'has space')).ok).toBe(false)
+    expect(await v('ntfy', undefined)).toEqual({ ok: false, error: 'กรุณาระบุชื่อหัวข้อ (topic) ของ ntfy' })
+
+    expect(await v('email', ' Someone@Example.COM ')).toEqual({ ok: true, target: 'someone@example.com' })
+    expect((await v('email', 'not-an-email')).ok).toBe(false)
+    expect((await v('email', 'a@b')).ok).toBe(false)
 
     const hook = 'https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz0123'
-    expect(validateChannelTarget('discord', hook)).toEqual({ ok: true, target: hook })
-    expect(validateChannelTarget('discord', 'https://example.com/api/webhooks/1/2').ok).toBe(false)
+    expect(await v('discord', hook)).toEqual({ ok: true, target: hook })
+    expect((await v('discord', 'https://example.com/api/webhooks/1/2')).ok).toBe(false)
 
     const sub = {
       endpoint: 'https://fcm.googleapis.com/fcm/send/abc',
       keys: { p256dh: Buffer.alloc(65, 4).toString('base64url'), auth: Buffer.alloc(16, 1).toString('base64url') },
     }
-    const r = validateChannelTarget('webpush', sub)
+    const r = await v('webpush', sub)
     expect(r.ok).toBe(true)
-    expect(validateChannelTarget('webpush', JSON.stringify(sub)).ok).toBe(true)
-    expect(validateChannelTarget('webpush', { ...sub, endpoint: 'http://fcm.googleapis.com/x' }).ok).toBe(false)
-    expect(validateChannelTarget('webpush', { ...sub, endpoint: 'https://192.168.1.2/push' }).ok).toBe(false)
-    expect(validateChannelTarget('webpush', { endpoint: 'https://x.example/y' }).ok).toBe(false)
+    expect((await v('webpush', JSON.stringify(sub))).ok).toBe(true)
+    expect((await v('webpush', { ...sub, endpoint: 'http://fcm.googleapis.com/x' })).ok).toBe(false)
+    expect((await v('webpush', { ...sub, endpoint: 'https://192.168.1.2/push' })).ok).toBe(false)
+    expect((await v('webpush', { endpoint: 'https://x.example/y' })).ok).toBe(false)
 
-    expect(validateChannelTarget('line', 'ignored')).toEqual({ ok: true, target: '' })
+    expect(await v('line', 'ignored')).toEqual({ ok: true, target: '' })
+  })
+
+  it('refuses URLs whose host resolves to a private address (SSRF)', async () => {
+    const v = (type: Channel['type'], raw: unknown) => validateChannelTarget(type, raw, { lookup: fakeLookup })
+    for (const host of ['rebind.evil.example', 'loopback.evil.example', 'metadata.evil.example', 'v6.evil.example']) {
+      const r = await v('ntfy', `https://${host}/topic`)
+      expect(r).toEqual({ ok: false, error: expect.stringContaining('ไม่รองรับที่อยู่ภายในเครือข่าย') })
+    }
+    expect(await v('ntfy', 'https://nowhere.example.org/topic')).toEqual({ ok: false, error: expect.stringContaining('ไม่พบเซิร์ฟเวอร์') })
+    const sub = {
+      endpoint: 'https://loopback.evil.example/push/abc',
+      keys: { p256dh: Buffer.alloc(65, 4).toString('base64url'), auth: Buffer.alloc(16, 1).toString('base64url') },
+    }
+    expect((await v('webpush', sub)).ok).toBe(false)
+    // Discord URLs are pinned to discord.com and still DNS-checked.
+    const evilDiscord: LookupFn = async () => ['10.1.2.3']
+    const hook = 'https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz0123'
+    expect((await validateChannelTarget('discord', hook, { lookup: evilDiscord })).ok).toBe(false)
   })
 
   it('masks targets for public output', () => {
@@ -237,12 +335,69 @@ describe('http helpers', () => {
     const bad = new Request('http://x/', { method: 'POST', body: '{nope' })
     await expect(readJson(bad)).rejects.toMatchObject({ status: 400 })
     expect(await readJson(new Request('http://x/', { method: 'POST', body: '' }))).toEqual({})
+    expect(await readJson(new Request('http://x/', { method: 'POST', body: '{"a":"น้ำ"}' }))).toEqual({ a: 'น้ำ' })
   })
 
-  it('picks the client IP from proxy headers', () => {
-    expect(clientIp(new Request('http://x/', { headers: { 'x-forwarded-for': '1.2.3.4, 10.0.0.1' } }))).toBe('1.2.3.4')
-    expect(clientIp(new Request('http://x/', { headers: { 'cf-connecting-ip': '5.6.7.8', 'x-forwarded-for': '1.2.3.4' } }))).toBe('5.6.7.8')
-    expect(clientIp(new Request('http://x/'))).toBe('unknown')
+  it('refuses a declared Content-Length over the cap without reading the body', async () => {
+    let pulled = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++
+        c.enqueue(new Uint8Array(1024))
+      },
+    })
+    const req = new Request('http://x/', { method: 'POST', body, duplex: 'half', headers: { 'content-length': String(10 * 1024 * 1024) } } as RequestInit)
+    await expect(readBodyCapped(req, 1024)).rejects.toMatchObject({ status: 413 })
+    expect(pulled).toBeLessThanOrEqual(1) // the stream may prime one chunk; it is never drained
+  })
+
+  it('stops reading a chunked body as soon as it passes the cap', async () => {
+    let pulled = 0
+    let cancelled = false
+    // An endless upload without Content-Length.
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++
+        c.enqueue(new Uint8Array(16 * 1024))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const req = new Request('http://x/', { method: 'POST', body, duplex: 'half' } as RequestInit)
+    const err = await readBodyCapped(req, 64 * 1024).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(HttpError)
+    expect((err as HttpError).status).toBe(413)
+    expect(cancelled).toBe(true)
+    expect(pulled).toBeLessThan(10)
+    const small = new Request('http://x/', { method: 'POST', body: 'hello' })
+    expect(new TextDecoder().decode(await readBodyCapped(small, 5))).toBe('hello')
+  })
+
+  it('reads the client IP only from the header of the trusted proxy (TRUST_PROXY)', () => {
+    const r = (headers: Record<string, string>) => new Request('http://x/', { headers })
+    const spoofed = { 'cf-connecting-ip': '5.6.7.8', 'x-real-ip': '9.9.9.9', 'x-forwarded-for': '1.2.3.4, 10.0.0.1' }
+    expect(clientIp(r(spoofed), 'none')).toBe('unknown')
+    expect(clientIp(r(spoofed), 'cloudflare')).toBe('5.6.7.8')
+    expect(clientIp(r(spoofed), 'vercel')).toBe('9.9.9.9')
+    expect(clientIp(r({ 'x-forwarded-for': '1.2.3.4, 10.0.0.1', 'cf-connecting-ip': '5.6.7.8' }), 'vercel')).toBe('1.2.3.4')
+    expect(clientIp(r(spoofed), 'xff')).toBe('1.2.3.4')
+    // A client-chosen header the proxy does not set is ignored.
+    expect(clientIp(r({ 'cf-connecting-ip': '5.6.7.8' }), 'vercel')).toBe('unknown')
+    expect(clientIp(r({ 'x-forwarded-for': '1.2.3.4' }), 'cloudflare')).toBe('unknown')
+    // Garbage and IPv4-mapped forms are normalised.
+    expect(clientIp(r({ 'x-forwarded-for': 'not-an-ip' }), 'xff')).toBe('unknown')
+    expect(clientIp(r({ 'x-forwarded-for': '::ffff:203.0.113.9' }), 'xff')).toBe('203.0.113.9')
+    expect(clientIp(r({ 'cf-connecting-ip': '2001:DB8::1' }), 'cloudflare')).toBe('2001:db8::1')
+  })
+
+  it('defaults TRUST_PROXY to vercel on Vercel and none elsewhere', () => {
+    expect(loadConfig({}).TRUST_PROXY).toBe('none')
+    expect(loadConfig({ VERCEL: '1' }).TRUST_PROXY).toBe('vercel')
+    expect(loadConfig({ VERCEL: '1', TRUST_PROXY: 'cloudflare' }).TRUST_PROXY).toBe('cloudflare')
+    expect(loadConfig({ TRUST_PROXY: ' XFF ' }).TRUST_PROXY).toBe('xff')
+    expect(loadConfig({ TRUST_PROXY: '' }).TRUST_PROXY).toBe('none')
+    expect(() => loadConfig({ TRUST_PROXY: 'everything' })).toThrow()
   })
 
   it('formats log stamps in Bangkok time', () => {
@@ -250,7 +405,102 @@ describe('http helpers', () => {
   })
 })
 
+describe('SSRF guard (net)', () => {
+  it('classifies private and public addresses', () => {
+    const priv = [
+      '127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '100.64.0.1', '100.127.255.254',
+      '169.254.169.254', '0.0.0.0', '0.1.2.3', '224.0.0.1', '239.255.255.250', '255.255.255.255', '198.18.0.1',
+      '::', '::1', '[::1]', 'fe80::1', 'fe80::1%eth0', 'febf::1', 'fc00::1', 'fd12:3456::1', 'ff02::1',
+      '::ffff:127.0.0.1', '::ffff:8.8.8.8', '::ffff:7f00:1', '::127.0.0.1', '64:ff9b::a00:1', '2002:c0a8:101::1',
+      '2001:db8::1', 'not-an-ip', '',
+    ]
+    const pub = ['8.8.8.8', '1.1.1.1', '172.32.0.1', '100.128.0.1', '142.250.4.95', '2606:4700::1111', '2001:4860:4860::8888', '64:ff9b::808:808', '2002:808:808::1']
+    for (const ip of priv) expect([ip, isPrivateAddress(ip)]).toEqual([ip, true])
+    for (const ip of pub) expect([ip, isPrivateAddress(ip)]).toEqual([ip, false])
+  })
+
+  it('rejects LAN-style and literal-IP host names before any DNS lookup', () => {
+    expect(isPublicHostname('ntfy.example.org')).toBe(true)
+    for (const h of ['localhost', 'nas.local', 'router.lan', 'svc.internal', '10.0.0.1', '[::1]', 'intranet', 'printer.home']) {
+      expect([h, isPublicHostname(h)]).toEqual([h, false])
+    }
+  })
+
+  it('assertPublicUrl requires https, no credentials and only public resolved addresses', async () => {
+    await expect(assertPublicUrl('https://ntfy.example.org/x', { lookup: fakeLookup })).resolves.toBeInstanceOf(URL)
+    await expect(assertPublicUrl('http://ntfy.example.org/x', { lookup: fakeLookup })).rejects.toMatchObject({ reason: 'protocol' })
+    await expect(assertPublicUrl('https://u:p@ntfy.example.org/x', { lookup: fakeLookup })).rejects.toMatchObject({ reason: 'credentials' })
+    await expect(assertPublicUrl('https://127.0.0.1.nip.io/x', { lookup: async () => ['127.0.0.1'] })).rejects.toMatchObject({ reason: 'private-address' })
+    // One private address among public ones is enough to refuse (fetch may pick any).
+    await expect(assertPublicUrl('https://rebind.evil.example/', { lookup: fakeLookup })).rejects.toMatchObject({ reason: 'private-address' })
+    await expect(assertPublicUrl('https://nowhere.example.org/', { lookup: fakeLookup })).rejects.toMatchObject({ reason: 'dns' })
+    await expect(assertPublicUrl('https://empty.example.org/', { lookup: async () => [] })).rejects.toMatchObject({ reason: 'dns' })
+    await expect(assertPublicUrl('https://localhost:8080/', { lookup: fakeLookup })).rejects.toMatchObject({ reason: 'hostname' })
+    await expect(assertPublicUrl('not a url')).rejects.toMatchObject({ reason: 'invalid' })
+  })
+
+  it('recognises redirects from redirect: manual', () => {
+    expect(isRedirect(new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/' } }))).toBe(true)
+    expect(isRedirect(new Response(null, { status: 307 }))).toBe(true)
+    expect(isRedirect(new Response(null, { status: 200 }))).toBe(false)
+    expect(isRedirect(new Response(null, { status: 404 }))).toBe(false)
+  })
+})
+
 describe('RateLimiter', () => {
+  it('takeAll consumes from every bucket or from none', () => {
+    let t = 0
+    const rl = new RateLimiter(() => t)
+    const a = { capacity: 1, windowMs: 60_000 }
+    const b = { capacity: 3, windowMs: 3_600_000 }
+    expect(rl.takeAll([['a', a], ['b', b]]).ok).toBe(true)
+    const denied = rl.takeAll([['a', a], ['b', b]])
+    expect(denied).toMatchObject({ ok: false, blocked: ['a'] })
+    expect(denied.retryAfterSec).toBe(60)
+    // 'b' was not charged for the refused request: 2 tokens left.
+    expect(rl.take('b', b).ok).toBe(true)
+    expect(rl.take('b', b).ok).toBe(true)
+    expect(rl.take('b', b).ok).toBe(false)
+    t += 60_000
+    expect(rl.takeAll([['a', a], ['b', b]])).toMatchObject({ ok: false, blocked: ['b'] })
+  })
+
+  it('never evicts server-wide buckets when many client keys rotate', () => {
+    const rl = new RateLimiter(() => 0)
+    const global = { capacity: 2, windowMs: 3_600_000 }
+    expect(rl.take('place:*', global).ok).toBe(true)
+    expect(rl.take('place:*', global).ok).toBe(true)
+    for (let i = 0; i < 10_050; i++) rl.take(`place:10.0.${i >> 8}.${i & 255}`, { capacity: 1, windowMs: 1000 })
+    expect(rl.take('place:*', global).ok).toBe(false)
+  })
+
+  it('groups IPv6 clients by /64', () => {
+    expect(ipBucket('203.0.113.9')).toBe('203.0.113.9')
+    expect(ipBucket('2001:db8:1:2:aaaa::1')).toBe('2001:db8:1:2::/64')
+    expect(ipBucket('2001:db8:1:2:bbbb:cccc:dddd:eeee')).toBe('2001:db8:1:2::/64')
+    expect(ipBucket('2001:db8::1')).toBe('2001:db8:0:0::/64')
+  })
+
+  it('skips the per-IP bucket for unknown clients but keeps the global backstop', () => {
+    rateLimiter().reset()
+    const perIp = { capacity: 1, windowMs: 3_600_000 }
+    const global = { capacity: 3, windowMs: 3_600_000 }
+    enforceClientLimit('t', '198.51.100.1', perIp, global)
+    expect(() => enforceClientLimit('t', '198.51.100.1', perIp, global)).toThrow(HttpError)
+    enforceClientLimit('t', 'unknown', perIp, global)
+    enforceClientLimit('t', 'unknown', perIp, global)
+    const err = (() => {
+      try {
+        enforceClientLimit('t', '198.51.100.2', perIp, global)
+      } catch (e) {
+        return e
+      }
+    })()
+    expect(err).toMatchObject({ status: 429 })
+    expect(LIMITS.placeCreateGlobal.capacity).toBeGreaterThan(LIMITS.placeCreate.capacity)
+    rateLimiter().reset()
+  })
+
   it('allows a burst, refuses, then refills over the window', () => {
     let t = 0
     const rl = new RateLimiter(() => t)
@@ -286,6 +536,27 @@ describe('weather cache', () => {
     t += 2 * 60_000
     await cachedWeather(13.7563, 100.5018, { load, now: () => t })
     expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('snaps coordinates to the grid for both the key and the upstream request', async () => {
+    expect(snapToWeatherGrid(13.7563, 100.5018)).toEqual({ lat: 13.76, lng: 100.5 })
+    expect(snapToWeatherGrid(13.7299, 100.6901)).toEqual({ lat: 13.72, lng: 100.7 })
+    const load = vi.fn(async () => sample)
+    await cachedWeather(13.7299, 100.6901, { load, now: () => 0 })
+    expect(load.mock.calls[0]!.slice(0, 2)).toEqual([13.72, 100.7])
+  })
+
+  it('asks the upstream budget only on a cache miss and caches nothing when refused', async () => {
+    const load = vi.fn(async () => sample)
+    let allow = false
+    const allowUpstream = vi.fn(() => allow)
+    expect(await cachedWeather(14.0, 100.6, { load, now: () => 0, allowUpstream })).toBeNull()
+    expect(load).not.toHaveBeenCalled()
+    allow = true
+    expect(await cachedWeather(14.0, 100.6, { load, now: () => 0, allowUpstream })).toEqual(sample)
+    expect(await cachedWeather(14.0, 100.6, { load, now: () => 0, allowUpstream })).toEqual(sample)
+    expect(allowUpstream).toHaveBeenCalledTimes(2)
+    expect(load).toHaveBeenCalledTimes(1)
   })
 
   it('retries failures sooner and never throws', async () => {
@@ -445,6 +716,39 @@ describe('poller', () => {
     expect(posts[0]!.auth).toBe('Bearer tok')
     expect(posts[0]!.body.results).toHaveLength(1)
     expect(posts[0]!.body.failures.map((x) => x.source)).toEqual(['bma-rain'])
+  })
+
+  it('relays BMA sources one at a time (same host), other hosts in parallel', async () => {
+    let active = 0
+    let maxBmaActive = 0
+    const order: string[] = []
+    const slow = (id: SourceAdapter['id']): SourceAdapter => ({
+      ...fakeSource(id),
+      async fetch(ctx) {
+        if (id.startsWith('bma-')) {
+          active++
+          maxBmaActive = Math.max(maxBmaActive, active)
+        }
+        order.push(`start:${id}`)
+        await new Promise((r) => setTimeout(r, 5))
+        if (id.startsWith('bma-')) active--
+        return fakeSource(id).fetch(ctx)
+      },
+    })
+    const res = await runRelayCycle({
+      baseUrl: 'https://flood.example.org',
+      token: 'tok',
+      config: loadConfig({}),
+      sources: [slow('bma-canal'), slow('bma-rain'), slow('bma-roadflood'), slow('thaiwater-canal')],
+      fetch: (async () => Response.json({ inserted: 4 })) as unknown as typeof fetch,
+      log: () => {},
+      sleep: async () => {},
+    })
+    expect(res.ok).toBe(true)
+    expect(maxBmaActive).toBe(1)
+    expect(res.results.map((r) => r.source)).toEqual(['bma-canal', 'bma-rain', 'bma-roadflood', 'thaiwater-canal'])
+    // ThaiWater did not wait for the BMA queue.
+    expect(order.indexOf('start:thaiwater-canal')).toBeLessThan(order.indexOf('start:bma-rain'))
   })
 
   it('does not retry auth failures', async () => {

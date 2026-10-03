@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config'
-import { runAlerts, runIngest, type AlertReport, type CycleDeps, type IngestReport } from '../pipeline'
+import { fetchPolitely, runAlerts, runIngest, type AlertReport, type CycleDeps, type IngestReport } from '../pipeline'
 import type { SourceAdapter } from '../sources/types'
 import type { SourceFetchResult, SourceId } from '../types'
 import type { Logger } from './log'
@@ -134,8 +134,10 @@ export function ingestUrl(baseUrl: string): string {
 /** Fetch Thai-only sources locally and push them to `<baseUrl>/api/ingest`. */
 export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
   const now = opts.now?.() ?? new Date()
-  const settled = await Promise.allSettled(
-    opts.sources.map((s) => s.fetch({ fetch: opts.fetch, now, timeoutMs: opts.config.FETCH_TIMEOUT_MS, sleep: opts.sleep })),
+  // Same politeness as runIngest: sources on one upstream host (all bma-* live on
+  // weather.bangkok.go.th, whose WAF bans bursts) run one after another.
+  const settled = await fetchPolitely(opts.sources, (s) =>
+    s.fetch({ fetch: opts.fetch, now, timeoutMs: opts.config.FETCH_TIMEOUT_MS, sleep: opts.sleep }),
   )
   const results: SourceFetchResult[] = []
   const failures: { source: SourceId; error: string; attemptedAt: string }[] = []

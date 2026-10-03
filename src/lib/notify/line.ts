@@ -1,5 +1,6 @@
 import type { Channel } from '../types'
 import { SEND_TIMEOUT_MS, errorMessage, plainText, readErrorBody, truncate } from './format'
+import { discardBody, logHttpFailure } from './http'
 import type { ChannelSender, NotifyMessage, SendResult } from './types'
 
 // LINE Messaging API. Push messages count against the Official Account's monthly
@@ -33,9 +34,10 @@ async function linePost(
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...extraHeaders },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      redirect: 'manual',
     })
     if (res.ok) {
-      await res.arrayBuffer().catch(() => undefined)
+      await discardBody(res)
       return { ok: true }
     }
     const body = await readErrorBody(res)
@@ -46,7 +48,8 @@ async function linePost(
     } catch {
       // keep raw body
     }
-    return { ok: false, error: `LINE HTTP ${res.status}${detail ? `: ${detail}` : ''}`, gone: lineRecipientGone(res.status, body) }
+    // The detail stays in the server log; deliveries only get the status.
+    return { ok: false, error: logHttpFailure('LINE', res.status, detail), gone: lineRecipientGone(res.status, body) }
   } catch (err) {
     return { ok: false, error: errorMessage(err) }
   }

@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config'
 import type { Store } from '../store/types'
+import { parseLinkCode } from './channels'
 import { BOT_TEXT, isStatusRequest, linkByCode, placesForTarget, unlinkTarget } from './linking'
 import { log } from './log'
 import { LIMITS, rateLimiter } from './rate-limit'
@@ -33,17 +34,31 @@ export async function replyStatus(input: Omit<ChatTextInput, 'text' | 'isPrivate
   }
 }
 
-/** Handle one text message (after any platform command prefix was handled). */
+/**
+ * Handle one text message (after any platform command prefix was handled). A message
+ * is a link attempt only when it consists of one code; attempts are limited per chat
+ * and per platform so codes cannot be brute-forced through the bot.
+ */
 export async function handleChatText(input: ChatTextInput): Promise<string[]> {
   const { store, type, target, text } = input
   if (isStatusRequest(text)) return replyStatus(input)
-  const out = await linkByCode(store, type, text, target)
+  const code = parseLinkCode(text)
+  if (!code) return input.isPrivate ? [BOT_TEXT.help] : []
+
+  const allowed = rateLimiter().takeAll([
+    [`link:${type}:${target}`, LIMITS.linkAttemptChat],
+    [`link:${type}:*`, LIMITS.linkAttemptPlatform],
+  ])
+  if (!allowed.ok) {
+    log(`[bot] ${type} link attempts limited for a chat`)
+    return [BOT_TEXT.tooManyAttempts]
+  }
+  const out = await linkByCode(store, type, code, target, input.now)
   if (out.status === 'linked') {
     log(`[bot] ${type} channel ${out.channel.id} linked to place ${out.channel.placeId}`)
     return [BOT_TEXT.linked(out.place?.label ?? 'จุดเฝ้าระวัง')]
   }
-  if (out.status === 'not_found') return input.isPrivate || text.trim().length <= 8 ? [BOT_TEXT.notFound] : []
-  return input.isPrivate ? [BOT_TEXT.help] : []
+  return [out.status === 'expired' ? BOT_TEXT.expired : BOT_TEXT.notFound]
 }
 
 /** /stop, unfollow, bot kicked: forget every channel bound to this chat. */

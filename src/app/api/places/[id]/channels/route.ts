@@ -2,13 +2,14 @@ import { getConfig } from '@/lib/config'
 import { availableChannels } from '@/lib/notify'
 import { confirmationEmail, sendEmail } from '@/lib/notify/email'
 import { parseSubscription } from '@/lib/notify/webpush'
-import { emailConfirmCode, generateLinkCode, validateChannelTarget } from '@/lib/server/channels'
+import { hashToken } from '@/lib/server/auth'
+import { emailConfirmCode, generateLinkCode, isLinkCodeExpired, validateChannelTarget } from '@/lib/server/channels'
 import { lateFetch } from '@/lib/server/context'
-import { clientIp, handler, HttpError, json, publicOrigin, readJson, type RouteCtx } from '@/lib/server/http'
+import { clientIp, handler, HttpError, json, MSG, publicOrigin, readJson, type RouteCtx } from '@/lib/server/http'
 import { log } from '@/lib/server/log'
 import { authorizePlace } from '@/lib/server/places'
 import { maskTarget, toPublicChannel, type ChannelLink } from '@/lib/server/public'
-import { enforceLimit, LIMITS } from '@/lib/server/rate-limit'
+import { enforceClientLimit, LIMITS, rateLimiter } from '@/lib/server/rate-limit'
 import { ChannelInputSchema } from '@/lib/server/validation'
 import { getStore } from '@/lib/store'
 import type { Channel } from '@/lib/types'
@@ -34,7 +35,8 @@ export const GET = handler('channels GET', async (req: Request, ctx: Ctx) => {
  * link code to reach the bot; e-mail waits for the confirmation link.
  */
 export const POST = handler('channels POST', async (req: Request, ctx: Ctx) => {
-  enforceLimit(`channel:${clientIp(req)}`, LIMITS.channelCreate)
+  // Per client IP (when a trusted proxy supplies it) plus a server-wide backstop.
+  enforceClientLimit('channel', clientIp(req), LIMITS.channelCreate, LIMITS.channelCreateGlobal)
   const { id } = await ctx.params
   const store = await getStore()
   const place = await authorizePlace(req, store, id)
@@ -43,11 +45,14 @@ export const POST = handler('channels POST', async (req: Request, ctx: Ctx) => {
   if (!availableChannels(config)[input.type]) {
     throw new HttpError(400, 'ช่องทางแจ้งเตือนนี้ยังไม่เปิดใช้งานบนเซิร์ฟเวอร์นี้')
   }
-  const target = validateChannelTarget(input.type, input.target)
+  // URLs (ntfy server, push endpoint, Discord) are SSRF-checked here, DNS included.
+  const target = await validateChannelTarget(input.type, input.target)
   if (!target.ok) throw new HttpError(400, target.error)
 
-  const existing = await store.listChannels(place.id)
-  const now = new Date().toISOString()
+  let existing = await store.listChannels(place.id)
+  let replacedEmail: Channel[] = []
+  const nowDate = new Date()
+  const now = nowDate.toISOString()
   const respond = (channel: Channel, status: number, link?: ChannelLink) =>
     json({ channel: toPublicChannel(channel), ...(link ? { link } : {}) }, { status })
 
@@ -66,10 +71,18 @@ export const POST = handler('channels POST', async (req: Request, ctx: Ctx) => {
   } else if (input.type === 'email') {
     const same = existing.find((c) => c.type === 'email' && c.target === target.target && c.verified)
     if (same) return respond(same, 200)
+    // At most one pending e-mail channel per place: a new request replaces the old one
+    // (deleted below, once the request passed the e-mail limits).
+    replacedEmail = existing.filter((c) => c.type === 'email' && !c.verified)
+    existing = existing.filter((c) => !replacedEmail.includes(c))
   } else {
-    // LINE / Telegram: hand out the pending code again rather than piling up channels.
-    const pending = existing.find((c) => c.type === input.type && !c.verified && c.linkCode)
-    if (pending) return respond(pending, 200, chatLink(input.type, pending.linkCode!, config))
+    // LINE / Telegram: hand out the pending code again rather than piling up channels,
+    // unless it expired: then it is replaced by a new pending channel with a fresh code.
+    const pending = existing.filter((c) => c.type === input.type && !c.verified && c.linkCode)
+    const live = pending.find((c) => !isLinkCodeExpired(c, nowDate))
+    if (live) return respond(live, 200, chatLink(input.type, live.linkCode!, config))
+    for (const c of pending) await store.deleteChannel(c.id)
+    if (pending.length > 0) existing = existing.filter((c) => !pending.includes(c))
   }
 
   if (existing.length >= MAX_CHANNELS_PER_PLACE) {
@@ -93,14 +106,31 @@ export const POST = handler('channels POST', async (req: Request, ctx: Ctx) => {
   }
 
   if (input.type === 'email') {
-    // Drop an older unconfirmed request for the same address; the new link replaces it.
-    for (const c of existing) {
-      if (c.type === 'email' && !c.verified && c.target === channel.target) await store.deleteChannel(c.id)
+    // Anyone can type any address here, so confirmation mail is limited per recipient
+    // (1 per 15 min, 3 per day; keyed by a hash so the limiter holds no addresses) and
+    // server-wide. In-memory: a restart or another serverless instance starts afresh.
+    const recipient = `email:${hashToken(channel.target)}`
+    const limited = rateLimiter().takeAll([
+      [recipient, LIMITS.emailConfirmRecipient],
+      [`${recipient}:day`, LIMITS.emailConfirmRecipientDay],
+      ['email:*', LIMITS.emailConfirmGlobal],
+    ])
+    if (!limited.ok) {
+      const perAddress = limited.blocked?.some((k) => k.startsWith(recipient)) ?? false
+      throw new HttpError(
+        429,
+        perAddress
+          ? 'ส่งอีเมลยืนยันไปยังที่อยู่นี้บ่อยเกินไป กรุณาตรวจสอบกล่องจดหมาย (รวมถึงจดหมายขยะ) หรือลองใหม่ภายหลัง'
+          : MSG.rateLimited,
+        { 'Retry-After': String(limited.retryAfterSec) },
+      )
     }
+    for (const c of replacedEmail) await store.deleteChannel(c.id)
     channel.linkCode = emailConfirmCode()
     await store.addChannel(channel)
     const url = `${publicOrigin(req, config.PUBLIC_BASE_URL)}/api/email/confirm?code=${encodeURIComponent(channel.linkCode)}`
-    const sent = await sendEmail(lateFetch, config, confirmationEmail(channel.target, place.label, url))
+    // The mail carries no user-supplied text (not even the place label).
+    const sent = await sendEmail(lateFetch, config, confirmationEmail(channel.target, url))
     if (!sent.ok) {
       log(`[api] confirmation e-mail failed: ${sent.error ?? 'unknown'}`)
       await store.deleteChannel(channel.id)

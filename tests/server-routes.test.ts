@@ -2,8 +2,9 @@ import { createECDH, randomBytes } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetConfigCache } from '@/lib/config'
 import { lineSignature } from '@/lib/server/auth'
+import { setDefaultLookupForTests } from '@/lib/server/net'
 import { clearRadarCache } from '@/lib/server/radar-proxy'
-import { rateLimiter } from '@/lib/server/rate-limit'
+import { LIMITS, rateLimiter } from '@/lib/server/rate-limit'
 import { clearWeatherCache } from '@/lib/server/weather-cache'
 import { __setStoreForTests } from '@/lib/store'
 import { SqliteStore } from '@/lib/store/sqlite'
@@ -72,6 +73,8 @@ const ENV = {
   STALE_MINUTES: '60',
   VAPID_PUBLIC_KEY: '',
   VAPID_PRIVATE_KEY: '',
+  // Tests send x-forwarded-for as if a reverse proxy had set it.
+  TRUST_PROXY: 'xff',
 }
 const saved: Record<string, string | undefined> = {}
 
@@ -97,6 +100,8 @@ function stubFetch() {
     if (url.startsWith('https://api.telegram.org/')) return Response.json({ ok: true, result: {} })
     if (url.startsWith('https://ntfy.sh')) return Response.json({ id: 'n1' })
     if (url.startsWith('https://api.resend.com/')) return Response.json({ id: 'e1' })
+    if (url.startsWith('https://ntfy.example.org/')) return new Response('INTERNAL-SECRET token=abc123', { status: 403 })
+    if (url.startsWith('https://hop.example.org/')) return new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:18081/admin' } })
     if (url.includes('weather.bangkok.go.th/FTPCustomer/radar')) {
       if (radarMode === 'down') throw new TypeError('fetch failed')
       return new Response(JPEG, { headers: { 'content-type': 'image/jpeg' } })
@@ -170,6 +175,17 @@ beforeAll(() => {
     process.env[k] = v
   }
   resetConfigCache()
+  // No real DNS in tests: a fixed table for the SSRF guard.
+  setDefaultLookupForTests(async (host) => {
+    const table: Record<string, string[]> = {
+      'ntfy.example.org': ['203.0.114.10'],
+      'hop.example.org': ['203.0.114.11'],
+      'internal.evil.example': ['10.0.0.8'],
+    }
+    const hit = table[host]
+    if (!hit) throw new Error(`ENOTFOUND ${host}`)
+    return hit
+  })
 })
 
 afterAll(() => {
@@ -179,6 +195,7 @@ afterAll(() => {
   }
   resetConfigCache()
   __setStoreForTests(null)
+  setDefaultLookupForTests(null)
   vi.unstubAllGlobals()
 })
 
@@ -236,6 +253,40 @@ describe('places API', () => {
     expect(await store.getPlace(id)).toBeNull()
   })
 
+  it('resets alert state when an edit changes what the place is alerted about', async () => {
+    const { id, token } = await createPlace()
+    const t = new Date().toISOString()
+    const state = { placeId: id, key: `station:${nearStation.id}`, level: 'warning' as const, lastValue: 0.2, lastNotifiedAt: t, updatedAt: t }
+    await store.setAlertStates([state])
+    const patch = (json: Record<string, unknown>) => placeRoute.PATCH(req(`/api/places/${id}`, { method: 'PATCH', token, json }), ctx({ id }))
+    expect((await patch({ label: 'ชื่อใหม่' })).status).toBe(200)
+    expect(await store.getAlertStates(id)).toHaveLength(1)
+    expect((await patch({ notifyMinLevel: 'watch' })).status).toBe(200)
+    expect(await store.getAlertStates(id)).toEqual([])
+    await store.setAlertStates([state])
+    expect((await patch({ lat: 13.76 })).status).toBe(200)
+    expect(await store.getAlertStates(id)).toEqual([])
+  })
+
+  it('caps request bodies while streaming (no Content-Length needed)', async () => {
+    let pulled = 0
+    const endless = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++
+        c.enqueue(new Uint8Array(32 * 1024).fill(32))
+      },
+    })
+    const res = await placesRoute.POST(
+      new Request(`${BASE}/api/places`, { method: 'POST', body: endless, duplex: 'half', headers: { 'x-forwarded-for': '203.0.113.50' } } as RequestInit),
+    )
+    expect(res.status).toBe(413)
+    expect(pulled).toBeLessThan(10)
+    const declared = await placesRoute.POST(
+      req('/api/places', { body: '{}', headers: { 'content-length': String(500 * 1024 * 1024), 'x-forwarded-for': '203.0.113.51' } }),
+    )
+    expect(declared.status).toBe(413)
+  })
+
   it('rate-limits place creation to 10 per hour per IP', async () => {
     for (let i = 0; i < 10; i++) await createPlace({}, '198.51.100.7')
     const res = await placesRoute.POST(
@@ -245,6 +296,34 @@ describe('places API', () => {
     expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0)
     expect((await body(res)).error).toContain('บ่อยเกินไป')
     await createPlace({}, '198.51.100.8')
+  })
+
+  it('ignores client-chosen IP headers the trusted proxy does not set', async () => {
+    // TRUST_PROXY=xff: a rotating CF-Connecting-IP must not open fresh buckets.
+    for (let i = 0; i < 10; i++) {
+      const r = await placesRoute.POST(
+        req('/api/places', { json: { label: 'x', lat: 13.7, lng: 100.5 }, headers: { 'x-forwarded-for': '198.51.100.9', 'cf-connecting-ip': `1.1.1.${i}` } }),
+      )
+      expect(r.status).toBe(201)
+    }
+    const r = await placesRoute.POST(
+      req('/api/places', { json: { label: 'x', lat: 13.7, lng: 100.5 }, headers: { 'x-forwarded-for': '198.51.100.9', 'cf-connecting-ip': '1.1.1.99' } }),
+    )
+    expect(r.status).toBe(429)
+  })
+
+  it('without a trusted proxy (TRUST_PROXY=none) only the server-wide cap applies', async () => {
+    process.env.TRUST_PROXY = 'none'
+    resetConfigCache()
+    try {
+      const post = () => placesRoute.POST(req('/api/places', { json: { label: 'x', lat: 13.7, lng: 100.5 }, headers: { 'x-forwarded-for': '198.51.100.10' } }))
+      // Far more than the per-IP 10/hour: every visitor shares 'unknown', which is not limited per IP.
+      for (let i = 0; i < LIMITS.placeCreateGlobal.capacity; i++) expect((await post()).status).toBe(201)
+      expect((await post()).status).toBe(429)
+    } finally {
+      process.env.TRUST_PROXY = 'xff'
+      resetConfigCache()
+    }
   })
 })
 
@@ -285,13 +364,52 @@ describe('channels API', () => {
     expect(res.status).toBe(201)
     const b = await body<{ channel: { verified: boolean; linkCode: string }; link: { code: string; url: string; instructions: string } }>(res)
     expect(b.channel.verified).toBe(false)
-    expect(b.link.code).toMatch(/^[A-HJ-NP-Z2-9]{6}$/)
+    expect(b.link.code).toMatch(/^[A-HJ-NP-Z2-9]{8}$/)
     expect(b.link.url).toBe(`https://t.me/flood_bot?start=${b.link.code}`)
     expect(b.channel.linkCode).toBe(b.link.code)
     const again = await body<{ link: { code: string } }>(
       await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'telegram' } }), ctx({ id })),
     )
     expect(again.link.code).toBe(b.link.code)
+  })
+
+  it('replaces an expired pending link code with a fresh one', async () => {
+    const { id, token } = await createPlace()
+    const first = await body<{ channel: { id: string; linkExpiresAt: string }; link: { code: string } }>(
+      await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'line' } }), ctx({ id })),
+    )
+    expect(Date.parse(first.channel.linkExpiresAt) - Date.now()).toBeGreaterThan(59 * 60_000)
+    const [pending] = await store.listChannels(id)
+    await store.updateChannel({ ...pending!, createdAt: new Date(Date.now() - 61 * 60_000).toISOString() })
+    const res = await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'line' } }), ctx({ id }))
+    expect(res.status).toBe(201)
+    const second = await body<{ channel: { id: string }; link: { code: string } }>(res)
+    expect(second.link.code).not.toBe(first.link.code)
+    expect((await store.listChannels(id)).map((c) => c.id)).toEqual([second.channel.id])
+  })
+
+  it('refuses ntfy servers on private addresses and never returns upstream bodies', async () => {
+    const { id, token } = await createPlace()
+    const internal = await channelsRoute.POST(
+      req(`/api/places/${id}/channels`, { token, json: { type: 'ntfy', target: 'https://internal.evil.example/topic' } }),
+      ctx({ id }),
+    )
+    expect(internal.status).toBe(400)
+    expect((await body(internal)).error).toContain('ไม่รองรับที่อยู่ภายในเครือข่าย')
+
+    for (const target of ['https://ntfy.example.org/topic', 'https://hop.example.org/topic']) {
+      expect((await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'ntfy', target } }), ctx({ id }))).status).toBe(201)
+    }
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const res = await testRoute.POST(req(`/api/places/${id}/test`, { token, json: {} }), ctx({ id }))
+    logSpy.mockRestore()
+    const b = await body<{ deliveries: { ok: boolean; error: string }[] }>(res)
+    expect(b.deliveries.map((d) => d.error).sort()).toEqual(['HTTP 302 (redirect not followed)', 'HTTP 403'])
+    expect(JSON.stringify(b)).not.toContain('INTERNAL-SECRET')
+    // The redirect target was never requested.
+    expect(outbound.map((c) => c.url)).not.toContain('http://127.0.0.1:18081/admin')
+    const events = await store.listAlertEvents(id, 5)
+    expect(JSON.stringify(events)).not.toContain('INTERNAL-SECRET')
   })
 
   it('deletes only channels of the authorised place', async () => {
@@ -329,30 +447,70 @@ describe('channels API', () => {
     expect(res.status).toBe(400)
   })
 
-  it('confirms e-mail channels through the emailed link', async () => {
-    const { id, token } = await createPlace()
+  it('confirms e-mail channels only through the button (POST), not by opening the link', async () => {
+    const { id, token } = await createPlace({ label: 'ยืนยันด่วน https://evil.example/x' })
     const res = await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'email', target: 'Owner@Example.com' } }), ctx({ id }))
     expect(res.status).toBe(201)
     const b = await body<{ channel: { id: string; verified: boolean; target: string }; link: { instructions: string; code?: string } }>(res)
     expect(b.channel).toMatchObject({ verified: false, target: 'ow***@example.com' })
     expect(b.link.code).toBeUndefined()
     const mail = outbound.find((c) => c.url === 'https://api.resend.com/emails')!
-    const sent = JSON.parse(mail.body) as { to: string; text: string }
+    const sent = JSON.parse(mail.body) as { to: string; subject: string; text: string; html: string }
     expect(sent.to).toBe('owner@example.com')
+    // The free-form place label never appears in the mail.
+    expect(`${sent.subject}${sent.text}${sent.html}`).not.toContain('evil.example')
     const link = sent.text.match(/https:\/\/flood\.example\.org\/api\/email\/confirm\?code=([A-Za-z0-9_-]+)/)
     expect(link).not.toBeNull()
+    const code = link![1]!
 
-    const bad = await emailConfirmRoute.GET(req('/api/email/confirm?code=wrong-code-wrong-code'))
+    // GET (what a mail scanner does) shows the page but verifies nothing.
+    const page = await emailConfirmRoute.GET(req(`/api/email/confirm?code=${code}`))
+    expect(page.status).toBe(200)
+    expect(page.headers.get('content-type')).toContain('text/html')
+    expect(page.headers.get('referrer-policy')).toBe('no-referrer')
+    const html = await page.text()
+    expect(html).toContain('ยืนยันการรับแจ้งเตือน')
+    expect(html).toContain('method="post"')
+    expect(html).toContain(`name="code" value="${code}"`)
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
+
+    const badPage = await emailConfirmRoute.GET(req('/api/email/confirm?code=wrong-code-wrong-code'))
+    expect(badPage.status).toBe(404)
+    expect(await badPage.text()).not.toContain('<form')
+
+    const form = (c: string) =>
+      req('/api/email/confirm', { method: 'POST', body: `code=${encodeURIComponent(c)}`, headers: { 'content-type': 'application/x-www-form-urlencoded' } })
+    const bad = await emailConfirmRoute.POST(form('wrong-code-wrong-code'))
     expect(bad.status).toBe(303)
     expect(bad.headers.get('location')).toBe('https://flood.example.org/alerts?confirmed=0')
 
-    const ok = await emailConfirmRoute.GET(req(`/api/email/confirm?code=${link![1]}`))
+    const ok = await emailConfirmRoute.POST(form(code))
+    expect(ok.status).toBe(303)
     expect(ok.headers.get('location')).toBe('https://flood.example.org/alerts?confirmed=1')
     const [ch] = await store.listChannels(id)
     expect(ch).toMatchObject({ verified: true, linkCode: null })
     // Single use.
-    const again = await emailConfirmRoute.GET(req(`/api/email/confirm?code=${link![1]}`))
+    const again = await emailConfirmRoute.POST(form(code))
     expect(again.headers.get('location')).toContain('confirmed=0')
+  })
+
+  it('limits confirmation e-mails per recipient and keeps one pending e-mail per place', async () => {
+    const { id, token } = await createPlace()
+    const add = (target: string, placeId = id, tok = token) =>
+      channelsRoute.POST(req(`/api/places/${placeId}/channels`, { token: tok, json: { type: 'email', target } }), ctx({ id: placeId }))
+    expect((await add('victim@example.com')).status).toBe(201)
+    // Same address again (from this or any other place) within 15 minutes: refused.
+    const again = await add('VICTIM@example.com')
+    expect(again.status).toBe(429)
+    expect((await body(again)).error).toContain('ที่อยู่นี้')
+    const other = await createPlace()
+    expect((await add('victim@example.com', other.id, other.token)).status).toBe(429)
+    expect(outbound.filter((c) => c.url === 'https://api.resend.com/emails')).toHaveLength(1)
+
+    // A different address replaces the pending one: never more than one pending e-mail.
+    expect((await add('second@example.com')).status).toBe(201)
+    const pending = (await store.listChannels(id)).filter((c) => c.type === 'email' && !c.verified)
+    expect(pending.map((c) => c.target)).toEqual(['second@example.com'])
   })
 })
 
@@ -399,11 +557,67 @@ describe('LINE webhook', () => {
     expect(status.messages[0]!.text).toContain('ปตร. คลองทดสอบ')
 
     outbound = []
-    await lineWebhook({ events: [{ type: 'message', replyToken: 'rt-x', source, message: { type: 'text', text: 'ZZZZ22' } }] })
+    await lineWebhook({ events: [{ type: 'message', replyToken: 'rt-x', source, message: { type: 'text', text: 'ZZZZ2222' } }] })
     expect(JSON.parse(outbound[0]!.body).messages[0].text).toContain('ไม่พบรหัสเชื่อมต่อ')
 
     await lineWebhook({ events: [{ type: 'unfollow', source }] })
     expect(await store.listChannels(id)).toEqual([])
+  })
+
+  it('refuses unsigned or oversized requests before reading the body', async () => {
+    let pulled = 0
+    const endless = () =>
+      new ReadableStream<Uint8Array>({
+        pull(c) {
+          pulled++
+          c.enqueue(new Uint8Array(64 * 1024))
+        },
+      })
+    const unsigned = await lineRoute.POST(new Request(`${BASE}/api/line/webhook`, { method: 'POST', body: endless(), duplex: 'half' } as RequestInit))
+    expect(unsigned.status).toBe(401)
+    expect(pulled).toBeLessThanOrEqual(1)
+    const declared = await lineRoute.POST(
+      req('/api/line/webhook', { body: '{}', headers: { 'x-line-signature': 'x', 'content-length': String(2 * 1024 * 1024) } }),
+    )
+    expect(declared.status).toBe(413)
+    pulled = 0
+    const chunked = await lineRoute.POST(
+      new Request(`${BASE}/api/line/webhook`, { method: 'POST', body: endless(), duplex: 'half', headers: { 'x-line-signature': 'x' } } as RequestInit),
+    )
+    expect(chunked.status).toBe(413)
+    expect(pulled).toBeLessThan(40)
+  })
+
+  it('tries one code per message, limits attempts per chat and refuses expired codes', async () => {
+    const { id, token } = await createPlace()
+    const created = await body<{ link: { code: string } }>(
+      await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'line' } }), ctx({ id })),
+    )
+    const say = (userId: string, text: string) => {
+      outbound = []
+      return lineWebhook({ events: [{ type: 'message', replyToken: 'rt', source: { type: 'user', userId }, message: { type: 'text', text } }] })
+    }
+    const reply = () => (JSON.parse(outbound[0]!.body) as { messages: { text: string }[] }).messages[0]!.text
+
+    // The real code hidden among many guesses in one message is not tried.
+    await say('Uattacker', `AAAA2222 ${created.link.code} BBBB3333`)
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
+
+    // Five wrong single-code attempts per chat, then the chat is told to wait.
+    for (let i = 0; i < 5; i++) {
+      await say('Uattacker', `ZZZZ222${i + 2}`)
+      expect(reply()).toContain('ไม่พบรหัสเชื่อมต่อ')
+    }
+    await say('Uattacker', created.link.code)
+    expect(reply()).toContain('บ่อยเกินไป')
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
+
+    // Another chat is unaffected, but the code has expired meanwhile.
+    const [pending] = await store.listChannels(id)
+    await store.updateChannel({ ...pending!, createdAt: new Date(Date.now() - 61 * 60_000).toISOString() })
+    await say('Uowner', created.link.code)
+    expect(reply()).toContain('หมดอายุ')
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
   })
 
   it('stays quiet about chatter in groups', async () => {
@@ -446,6 +660,18 @@ describe('Telegram webhook', () => {
     await telegramWebhook({ update_id: 5, my_chat_member: { chat, new_chat_member: { status: 'kicked' } } })
     expect(await store.listChannels(id)).toEqual([])
   })
+
+  it('accepts only one code as the /start argument', async () => {
+    const { id, token } = await createPlace()
+    const created = await body<{ link: { code: string } }>(
+      await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'telegram' } }), ctx({ id })),
+    )
+    const chat = { id: 777, type: 'private' }
+    await telegramWebhook({ update_id: 10, message: { message_id: 1, chat, text: `/start AAAA2222 ${created.link.code}` } })
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
+    await telegramWebhook({ update_id: 11, message: { message_id: 2, chat, text: `/start ${created.link.code}` } })
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: true, target: '777' })
+  })
 })
 
 describe('machine endpoints', () => {
@@ -468,15 +694,24 @@ describe('machine endpoints', () => {
     const invalid = await ingestRoute.POST(req('/api/ingest', { json: { results: [{ source: 'x' }] }, token: 'ingest-token' }))
     expect(invalid.status).toBe(400)
 
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const ok = await ingestRoute.POST(req('/api/ingest', { json: payload, token: 'ingest-token' }))
     expect(ok.status).toBe(200)
-    expect(await body(ok)).toMatchObject({ ok: true, inserted: 1, alerts: { places: 0, events: [] } })
+    // Alerts run after the response (Next.js after(); detached outside a request scope).
+    expect(await body(ok)).toMatchObject({ ok: true, inserted: 1, alerts: 'scheduled' })
+    await vi.waitFor(() => expect(logSpy.mock.calls.flat().join('\n')).toContain('[ingest] alerts:'))
+    logSpy.mockRestore()
     expect((await store.listStations()).map((s) => s.id)).toEqual([nearStation.id])
     const health = await store.listSourceHealth()
     expect(health.find((h) => h.source === 'bma-canal')).toMatchObject({ ok: true, stationCount: 1 })
     expect(health.find((h) => h.source === 'bma-rain')).toMatchObject({ ok: false, error: 'HTTP 403' })
     expect(await store.getMeta('lastIngestAt')).not.toBeNull()
     expect(health.find((h) => h.source === 'bma-canal')?.latestObservationAt).toBe(payload.results[0]!.readings[0]!.observedAt)
+  })
+
+  it('gives the long-running machine endpoints a 300 s budget', () => {
+    expect(cronRoute.maxDuration).toBe(300)
+    expect(ingestRoute.maxDuration).toBe(300)
   })
 
   it('cron requires CRON_SECRET and runs a cycle', async () => {
@@ -527,8 +762,20 @@ describe('public read endpoints', () => {
     expect((await snapshotRoute.GET(req('/api/snapshot?place=00000000-0000-0000-0000-000000000000'))).status).toBe(404)
     expect((await snapshotRoute.GET(req('/api/snapshot?lat=13.7'))).status).toBe(400)
     expect((await snapshotRoute.GET(req('/api/snapshot?lat=abc&lng=100'))).status).toBe(400)
+    const abroad = await snapshotRoute.GET(req('/api/snapshot?lat=35.68&lng=139.69'))
+    expect(abroad.status).toBe(400)
+    expect((await body(abroad)).error).toBe('ตำแหน่งต้องอยู่ในประเทศไทย')
     const def = await body<DashboardSnapshot>(await snapshotRoute.GET(req('/api/snapshot?r=99&n=0')))
     expect(def.place).toMatchObject({ label: 'กรุงเทพมหานคร', radiusKm: 20, maxStations: 1 })
+  })
+
+  it('rate-limits snapshots per client IP', async () => {
+    const get = (ip: string) => snapshotRoute.GET(req('/api/snapshot?lat=13.7563&lng=100.5018', { headers: { 'x-forwarded-for': ip } }))
+    for (let i = 0; i < LIMITS.snapshot.capacity; i++) expect((await get('203.0.113.77')).status).toBe(200)
+    const limited = await get('203.0.113.77')
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('retry-after')).not.toBeNull()
+    expect((await get('203.0.113.78')).status).toBe(200)
   })
 
   it('stations lists map rows with levels', async () => {

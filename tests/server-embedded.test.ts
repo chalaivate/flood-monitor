@@ -88,3 +88,59 @@ describe('instrumentation / embedded worker', () => {
     log.mockRestore()
   })
 })
+
+describe('embedded worker restart', () => {
+  type G = typeof globalThis & {
+    __floodEmbeddedWorker?: Promise<{ stop(): Promise<void> } | null>
+    __floodEmbeddedWorkerFailures?: number
+    __floodEmbeddedWorkerRetry?: unknown
+  }
+  const g = globalThis as G
+
+  it('backs off 30 s, doubling to at most 5 min', async () => {
+    const { retryDelayMs } = await import('@/lib/server/embedded-worker')
+    expect([1, 2, 3, 4, 5, 6, 10].map(retryDelayMs)).toEqual([30_000, 60_000, 120_000, 240_000, 300_000, 300_000, 300_000])
+  })
+
+  it('clears a failed start and retries until the store opens', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { startEmbeddedWorker } = await import('@/lib/server/embedded-worker')
+    // Stop the loop started by the previous test and forget it.
+    await (await g.__floodEmbeddedWorker)?.stop()
+    g.__floodEmbeddedWorker = undefined
+    g.__floodEmbeddedWorkerFailures = 0
+
+    // The store cannot be opened yet (Supabase selected without a URL).
+    __setStoreForTests(null)
+    process.env.STORE = 'supabase'
+    process.env.SUPABASE_URL = ''
+    resetConfigCache()
+
+    const timers: { fn: () => void; ms: number }[] = []
+    const opts = { setTimer: (fn: () => void, ms: number) => timers.push({ fn, ms }), clearTimer: () => {} }
+
+    expect(await startEmbeddedWorker(opts)).toBeNull()
+    expect(g.__floodEmbeddedWorker).toBeUndefined()
+    expect(timers.map((t) => t.ms)).toEqual([30_000])
+
+    // First retry fails too: the delay doubles.
+    timers[0]!.fn()
+    expect(await g.__floodEmbeddedWorker).toBeNull()
+    expect(timers.map((t) => t.ms)).toEqual([30_000, 60_000])
+    expect(log.mock.calls.flat().join('\n')).toContain('retrying in 60 s')
+
+    // The store becomes available: the next retry starts the loop.
+    process.env.STORE = 'sqlite'
+    resetConfigCache()
+    __setStoreForTests(new SqliteStore(':memory:'))
+    const before = fetched.count
+    timers[1]!.fn()
+    const handle = await g.__floodEmbeddedWorker
+    expect(handle).not.toBeNull()
+    expect(g.__floodEmbeddedWorkerFailures).toBe(0)
+    expect(startEmbeddedWorker(opts)).toBe(g.__floodEmbeddedWorker)
+    await vi.waitFor(() => expect(fetched.count).toBe(before + 1))
+    expect(timers).toHaveLength(2)
+    log.mockRestore()
+  })
+})

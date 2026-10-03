@@ -1,6 +1,7 @@
 import { getConfig } from '@/lib/config'
 import { META_LAST_INGEST, runAlerts, storeSourceResult } from '@/lib/pipeline'
 import { hasBearerSecret } from '@/lib/server/auth'
+import { runAfterResponse } from '@/lib/server/background'
 import { serverDeps } from '@/lib/server/context'
 import { handler, json, jsonError, readJson } from '@/lib/server/http'
 import { log } from '@/lib/server/log'
@@ -9,13 +10,17 @@ import type { SourceFetchResult } from '@/lib/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 60
+/** Alerts run after the response (Next.js after()), inside this same budget. */
+export const maxDuration = 300
 
 const MAX_BODY = 25 * 1024 * 1024
 
 /**
  * POST /api/ingest (Authorization: Bearer INGEST_TOKEN) body { results, failures? } → { inserted }
- * Used by `npm run worker -- --relay <url>` on a machine in Thailand.
+ * Used by `npm run worker -- --relay <url>` on a machine in Thailand. The relay gets its
+ * answer as soon as the readings are stored; alert evaluation and delivery (which can
+ * take a while with many channels) run after the response so the relay never times out
+ * and re-posts. `alerts` in the response is 'scheduled' or null (RUN_ALERTS=0 / no results).
  */
 export const POST = handler('ingest', async (req: Request) => {
   const config = getConfig()
@@ -65,6 +70,12 @@ export const POST = handler('ingest', async (req: Request) => {
   if (payload.results.length > 0) await store.setMeta(META_LAST_INGEST, now)
   log(`[ingest] relay: ${payload.results.length} result(s), ${payload.failures.length} failure(s), ${inserted} new readings`)
 
-  const alerts = config.RUN_ALERTS === '1' && payload.results.length > 0 ? await runAlerts(deps) : null
-  return json({ ok: true, inserted, sources: perSource, alerts })
+  const runAlertsNow = config.RUN_ALERTS === '1' && payload.results.length > 0
+  if (runAlertsNow) {
+    runAfterResponse('ingest', async () => {
+      const report = await runAlerts(deps)
+      log(`[ingest] alerts: ${report.events.length} event(s) for ${report.places} place(s)`)
+    })
+  }
+  return json({ ok: true, inserted, sources: perSource, alerts: runAlertsNow ? 'scheduled' : null })
 })

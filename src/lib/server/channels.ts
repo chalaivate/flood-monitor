@@ -3,14 +3,26 @@ import { isDiscordWebhookUrl } from '../notify/discord'
 import { NTFY_TOPIC_RE } from '../notify/ntfy'
 import { parseSubscription } from '../notify/webpush'
 import type { Store } from '../store/types'
-import type { ChannelType } from '../types'
+import type { Channel, ChannelType } from '../types'
+import { assertPublicUrl, isPublicHostname, UnsafeUrlError, type LookupFn } from './net'
+import { LINK_CODE_TTL_MS } from './public'
+
+export { LINK_CODE_TTL_MS }
 
 // Channel target validation and link codes.
 
 /** No I, O, 0, 1 — easy to read aloud and type on a phone. 32 symbols ⇒ unbiased from one byte. */
 export const LINK_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-export const LINK_CODE_LENGTH = 6
+/** 8 symbols × 5 bits = 40 bits; with attempt limits and a 60-minute lifetime that is not guessable. */
+export const LINK_CODE_LENGTH = 8
 export const LINK_CODE_RE = new RegExp(`^[${LINK_CODE_ALPHABET}]{${LINK_CODE_LENGTH}}$`)
+
+/** Pending LINE/Telegram codes stop working LINK_CODE_TTL_MS after the channel was created. */
+export function isLinkCodeExpired(channel: Pick<Channel, 'createdAt'>, now: Date = new Date()): boolean {
+  const t = Date.parse(channel.createdAt)
+  // An unreadable timestamp counts as expired: fail closed.
+  return !Number.isFinite(t) || now.getTime() >= t + LINK_CODE_TTL_MS
+}
 
 export function randomLinkCode(): string {
   const bytes = randomBytes(LINK_CODE_LENGTH)
@@ -19,7 +31,7 @@ export function randomLinkCode(): string {
   return out
 }
 
-/** A 6-character code not used by any pending channel. */
+/** A link code not used by any pending channel. */
 export async function generateLinkCode(store: Store, attempts = 10): Promise<string> {
   for (let i = 0; i < attempts; i++) {
     const code = randomLinkCode()
@@ -33,10 +45,15 @@ export function emailConfirmCode(): string {
   return randomBytes(24).toString('base64url')
 }
 
-/** Link codes the user may have typed inside a longer chat message ("รหัส ab12cd"). */
-export function extractLinkCodes(text: string): string[] {
-  const tokens = text.toUpperCase().match(/[A-Z0-9]+/g) ?? []
-  return [...new Set(tokens.filter((t) => LINK_CODE_RE.test(t)))]
+/**
+ * The link code in a chat message, or null. Only a message that *is* one code counts
+ * (case-insensitive, optionally after the word "รหัส" / "code"), so each message is at
+ * most one guess: scanning every token of a long message made codes brute-forceable.
+ */
+export function parseLinkCode(text: string): string | null {
+  const m = text.trim().match(/^(?:(?:รหัส(?:เชื่อมต่อ)?|code)\s*[:：]?\s*)?([A-Za-z0-9]+)$/i)
+  const code = m?.[1]?.toUpperCase()
+  return code && LINK_CODE_RE.test(code) ? code : null
 }
 
 const EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
@@ -45,22 +62,38 @@ export function isEmail(v: string): boolean {
   return v.length <= 254 && EMAIL_RE.test(v)
 }
 
-/** Literal IPs, localhost and internal-looking names are refused for user-supplied URLs (SSRF). */
-function isPublicHostname(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '')
-  if (!h.includes('.')) return false
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || h.includes(':')) return false
-  return !/(^|\.)(localhost|local|internal|lan|home|arpa)$/.test(h)
+export type TargetResult = { ok: true; target: string } | { ok: false; error: string }
+
+export interface ValidateTargetOptions {
+  /** DNS resolver for the SSRF check (tests). */
+  lookup?: LookupFn
 }
 
-export type TargetResult = { ok: true; target: string } | { ok: false; error: string }
+/** Thai message for a URL the SSRF guard refused. */
+function unsafeUrlMessage(err: unknown, what: string): string {
+  if (err instanceof UnsafeUrlError && (err.reason === 'dns' || err.reason === 'dns-timeout')) {
+    return `ไม่พบเซิร์ฟเวอร์ปลายทางของ${what} กรุณาตรวจสอบที่อยู่แล้วลองใหม่อีกครั้ง`
+  }
+  return `ปลายทางของ${what}ต้องเป็นเซิร์ฟเวอร์สาธารณะบนอินเทอร์เน็ต (ไม่รองรับที่อยู่ภายในเครือข่าย)`
+}
+
+/** SSRF check: the URL's host must resolve to public addresses only. */
+async function publicUrlError(url: string, what: string, opts: ValidateTargetOptions): Promise<string | null> {
+  try {
+    await assertPublicUrl(url, { lookup: opts.lookup })
+    return null
+  } catch (err) {
+    return unsafeUrlMessage(err, what)
+  }
+}
 
 /**
  * Validate and normalise the user-supplied target for channels that are verified
- * immediately (webpush, ntfy, discord) or by confirmation link (email).
+ * immediately (webpush, ntfy, discord) or by confirmation link (email). URLs are
+ * checked against the SSRF guard (DNS included) here and again at every send.
  * LINE / Telegram targets come from the bot webhook, never from the user.
  */
-export function validateChannelTarget(type: ChannelType, raw: unknown): TargetResult {
+export async function validateChannelTarget(type: ChannelType, raw: unknown, opts: ValidateTargetOptions = {}): Promise<TargetResult> {
   if (type === 'line' || type === 'telegram') return { ok: true, target: '' }
 
   if (type === 'webpush') {
@@ -70,6 +103,8 @@ export function validateChannelTarget(type: ChannelType, raw: unknown): TargetRe
     if (!isPublicHostname(new URL(sub.endpoint).hostname)) {
       return { ok: false, error: 'ปลายทาง Web Push ไม่ถูกต้อง' }
     }
+    const unsafe = await publicUrlError(sub.endpoint, ' Web Push', opts)
+    if (unsafe) return { ok: false, error: unsafe }
     return { ok: true, target: JSON.stringify(sub) }
   }
 
@@ -90,6 +125,8 @@ export function validateChannelTarget(type: ChannelType, raw: unknown): TargetRe
         const u = new URL(v)
         const topic = u.pathname.replace(/^\/+|\/+$/g, '')
         if (u.protocol === 'https:' && isPublicHostname(u.hostname) && !u.username && !u.password && !u.search && NTFY_TOPIC_RE.test(topic)) {
+          const unsafe = await publicUrlError(u.origin, ' ntfy', opts)
+          if (unsafe) return { ok: false, error: unsafe }
           return { ok: true, target: `${u.origin}/${topic}` }
         }
       } catch {
@@ -102,9 +139,12 @@ export function validateChannelTarget(type: ChannelType, raw: unknown): TargetRe
     }
     case 'email':
       return isEmail(v) ? { ok: true, target: v.toLowerCase() } : { ok: false, error: 'รูปแบบอีเมลไม่ถูกต้อง' }
-    case 'discord':
-      return isDiscordWebhookUrl(v)
-        ? { ok: true, target: v.replace(/\/+$/, '') }
-        : { ok: false, error: 'Webhook URL ต้องเป็นของ discord.com เช่น https://discord.com/api/webhooks/…' }
+    case 'discord': {
+      if (!isDiscordWebhookUrl(v)) {
+        return { ok: false, error: 'Webhook URL ต้องเป็นของ discord.com เช่น https://discord.com/api/webhooks/…' }
+      }
+      const unsafe = await publicUrlError(v, ' Discord', opts)
+      return unsafe ? { ok: false, error: unsafe } : { ok: true, target: v.replace(/\/+$/, '') }
+    }
   }
 }

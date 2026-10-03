@@ -6,13 +6,19 @@ import type { Channel, Level, Place, SourceId, StationKind } from '../types'
 /** Place without its manage-token hash. */
 export type PublicPlace = Omit<Place, 'manageTokenHash'>
 
+/** A pending LINE/Telegram link code is valid this long after its channel was created. */
+export const LINK_CODE_TTL_MS = 60 * 60_000
+
 /**
  * Channel as shown to its owner: `target` masked (e.g. `te***@gmail.com`), the
- * link code present only while a LINE/Telegram channel waits to be linked.
+ * link code (and when it stops working) present only while a LINE/Telegram channel
+ * waits to be linked. After `linkExpiresAt`, POSTing the same channel type again
+ * replaces the pending channel with a fresh code.
  */
 export type PublicChannel = Omit<Channel, 'target' | 'linkCode'> & {
   target: string
   linkCode?: string | null
+  linkExpiresAt?: string | null
 }
 
 /** Compact station row for the map (`GET /api/stations`). */
@@ -114,6 +120,11 @@ export function maskTarget(channel: Channel): string {
   }
 }
 
+function linkExpiry(createdAt: string): string | null {
+  const t = Date.parse(createdAt)
+  return Number.isFinite(t) ? new Date(t + LINK_CODE_TTL_MS).toISOString() : null
+}
+
 export function toPublicChannel(channel: Channel): PublicChannel {
   const showCode = !channel.verified && (channel.type === 'line' || channel.type === 'telegram')
   return {
@@ -122,7 +133,7 @@ export function toPublicChannel(channel: Channel): PublicChannel {
     type: channel.type,
     target: maskTarget(channel),
     verified: channel.verified,
-    ...(showCode ? { linkCode: channel.linkCode ?? null } : {}),
+    ...(showCode ? { linkCode: channel.linkCode ?? null, linkExpiresAt: linkExpiry(channel.createdAt) } : {}),
     createdAt: channel.createdAt,
   }
 }

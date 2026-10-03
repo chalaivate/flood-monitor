@@ -1,5 +1,6 @@
 import type { Channel } from '../types'
 import { SEND_TIMEOUT_MS, errorMessage, plainText, readErrorBody } from './format'
+import { logHttpFailure } from './http'
 import type { ChannelSender, NotifyMessage, SendResult } from './types'
 
 // Telegram Bot API sendMessage (plain text, no parse_mode so user-supplied labels
@@ -33,6 +34,7 @@ export async function telegramSendMessage(
         link_preview_options: { is_disabled: true },
       }),
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      redirect: 'manual',
     })
     const raw = await readErrorBody(res, 2000)
     let description = raw
@@ -45,9 +47,10 @@ export async function telegramSendMessage(
       // non-JSON body
     }
     if (ok) return { ok: true }
+    // The description stays in the server log; deliveries only get the status.
     return {
       ok: false,
-      error: `Telegram HTTP ${res.status}${description ? `: ${description.slice(0, 300)}` : ''}`,
+      error: logHttpFailure('Telegram', res.status, description.replaceAll(token, '<token>')),
       gone: telegramChatGone(res.status, description),
     }
   } catch (err) {

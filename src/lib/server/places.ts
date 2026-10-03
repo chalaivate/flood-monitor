@@ -45,6 +45,24 @@ export function patchPlace(place: Place, body: unknown, now = new Date()): Place
   return { ...place, ...merged, updatedAt: now.toISOString() }
 }
 
+/** Settings that decide what a place is alerted about (everything except the label). */
+const ALERT_SCALARS = ['lat', 'lng', 'radiusKm', 'maxStations', 'rapidRiseCm', 'notifyMinLevel'] as const
+const ALERT_THRESHOLDS = ['freeboard', 'rain'] as const
+const THRESHOLD_KEYS = ['watch', 'warning', 'critical'] as const
+
+/**
+ * Did an edit change what the place is alerted about? Alert states compare against the
+ * previous evaluation, so after such a change they must be cleared: otherwise a level
+ * that is already reached (e.g. after lowering notifyMinLevel or moving the place) is
+ * never reported, and loosened thresholds produce a "คลี่คลาย" without any real change.
+ */
+export function alertSettingsChanged(before: Place, after: Place): boolean {
+  return (
+    ALERT_SCALARS.some((k) => before[k] !== after[k]) ||
+    ALERT_THRESHOLDS.some((t) => THRESHOLD_KEYS.some((k) => before[t][k] !== after[t][k]))
+  )
+}
+
 /** Load a place and check `Authorization: Bearer <manageToken>`. Throws HttpError 401/404. */
 export async function authorizePlace(req: Request, store: Store, id: string): Promise<Place> {
   if (!ID_RE.test(id)) throw new HttpError(404, MSG.placeNotFound)

@@ -19,9 +19,20 @@ interface Entry {
 const g = globalThis as typeof globalThis & { __floodWeatherCache?: Map<string, Entry> }
 const cache = (g.__floodWeatherCache ??= new Map<string, Entry>())
 
+const snap = (v: number) => Number((Math.round(v / GRID) * GRID).toFixed(2))
+
+/**
+ * Centre of the 0.02° grid cell containing the point. Both the cache key and the
+ * upstream request use it, so arbitrary coordinates cannot multiply upstream calls
+ * beyond one per cell.
+ */
+export function snapToWeatherGrid(lat: number, lng: number): { lat: number; lng: number } {
+  return { lat: snap(lat), lng: snap(lng) }
+}
+
 export function weatherKey(lat: number, lng: number): string {
-  const r = (v: number) => (Math.round(v / GRID) * GRID).toFixed(2)
-  return `${r(lat)},${r(lng)}`
+  const p = snapToWeatherGrid(lat, lng)
+  return `${p.lat.toFixed(2)},${p.lng.toFixed(2)}`
 }
 
 export interface WeatherCacheOptions {
@@ -29,6 +40,11 @@ export interface WeatherCacheOptions {
   now?: () => number
   /** Override for tests. */
   load?: typeof getWeather
+  /**
+   * Asked before an upstream request (cache miss); false ⇒ no request, the result is null
+   * and nothing is cached. Used to cap upstream calls for ad-hoc coordinates.
+   */
+  allowUpstream?: () => boolean
 }
 
 export async function cachedWeather(lat: number, lng: number, opts: WeatherCacheOptions = {}): Promise<WeatherNow | null> {
@@ -39,7 +55,8 @@ export async function cachedWeather(lat: number, lng: number, opts: WeatherCache
     const ttl = hit.settled === null ? WEATHER_NULL_TTL_MS : WEATHER_TTL_MS
     if (now - hit.at < ttl) return hit.value
   }
-  const [glat, glng] = key.split(',').map(Number) as [number, number]
+  if (opts.allowUpstream && !opts.allowUpstream()) return null
+  const { lat: glat, lng: glng } = snapToWeatherGrid(lat, lng)
   const load = opts.load ?? getWeather
   const entry: Entry = { at: now, settled: undefined, value: Promise.resolve(null) }
   entry.value = load(glat, glng, { fetch: opts.fetch, now: new Date(now) })

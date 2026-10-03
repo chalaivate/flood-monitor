@@ -35,6 +35,8 @@ export interface LoadSnapshotOptions {
   fetch?: typeof fetch
   /** Skip the weather call (chat replies). */
   weather?: boolean
+  /** Budget check before an upstream weather request (see cachedWeather allowUpstream). */
+  weatherBudget?: () => boolean
 }
 
 export async function loadSnapshot(
@@ -49,7 +51,7 @@ export async function loadSnapshot(
   const since = new Date(now.getTime() - SNAPSHOT_HISTORY_MIN * 60_000).toISOString()
   const [history, weather, sources, lastIngestAt] = await Promise.all([
     store.history(ids, since),
-    opts.weather === false ? Promise.resolve(null) : cachedWeather(place.lat, place.lng, { fetch: opts.fetch }),
+    opts.weather === false ? Promise.resolve(null) : cachedWeather(place.lat, place.lng, { fetch: opts.fetch, allowUpstream: opts.weatherBudget }),
     store.listSourceHealth(),
     store.getMeta(META_LAST_INGEST),
   ])

@@ -1,6 +1,6 @@
 import { createECDH, randomBytes } from 'node:crypto'
 import webpush from 'web-push'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { loadConfig } from '@/lib/config'
 import { discordSender, isDiscordWebhookUrl } from '@/lib/notify/discord'
 import { emailSender, sendEmail, confirmationEmail } from '@/lib/notify/email'
@@ -11,13 +11,33 @@ import { ntfySender, ntfyTarget } from '@/lib/notify/ntfy'
 import { telegramSender } from '@/lib/notify/telegram'
 import type { NotifyMessage } from '@/lib/notify/types'
 import { buildPayload, parseSubscription, topicFor, webPushSender } from '@/lib/notify/webpush'
+import { readErrorBody } from '@/lib/notify/format'
+import { setDefaultLookupForTests, type LookupFn } from '@/lib/server/net'
 import type { Channel, ChannelType } from '@/lib/types'
+
+// Senders resolve user-supplied hosts before connecting (SSRF guard). Tests never touch
+// real DNS: this table stands in for the resolver.
+const fakeLookup: LookupFn = async (host) => {
+  const table: Record<string, string[]> = {
+    'fcm.googleapis.com': ['142.250.4.95'],
+    'ntfy.example.org': ['203.0.114.10'],
+    'discord.com': ['162.159.128.233'],
+    'internal.evil.example': ['192.168.1.10'],
+  }
+  const hit = table[host]
+  if (!hit) throw new Error(`ENOTFOUND ${host}`)
+  return hit
+}
+
+beforeAll(() => setDefaultLookupForTests(fakeLookup))
+afterAll(() => setDefaultLookupForTests(null))
 
 interface Call {
   url: string
   method: string
   headers: Record<string, string>
   body: string | Uint8Array | null
+  redirect: RequestRedirect | undefined
 }
 
 function fakeFetch(respond: (call: Call) => Response | Promise<Response> = () => new Response('{}', { status: 200 })) {
@@ -26,7 +46,7 @@ function fakeFetch(respond: (call: Call) => Response | Promise<Response> = () =>
     const headers: Record<string, string> = {}
     new Headers(init?.headers).forEach((v, k) => (headers[k] = v))
     const body = init?.body === undefined || init.body === null ? null : init.body instanceof Uint8Array ? init.body : String(init.body)
-    const call: Call = { url: String(input), method: init?.method ?? 'GET', headers, body }
+    const call: Call = { url: String(input), method: init?.method ?? 'GET', headers, body, redirect: init?.redirect }
     calls.push(call)
     return respond(call)
   }) as typeof fetch
@@ -115,6 +135,28 @@ describe('webpush sender', () => {
     expect(c.headers.topic).toBe(topicFor('place-p1'))
     expect(c.headers['content-length']).toBeUndefined()
     expect(c.body).toBeInstanceOf(Uint8Array)
+    expect(c.redirect).toBe('manual')
+  })
+
+  it('refuses endpoints that resolve to private addresses and never follows redirects', async () => {
+    const f = fakeFetch()
+    const internal = subscription('https://internal.evil.example/push/abc')
+    const blocked = await webPushSender.send(channel('webpush', JSON.stringify(internal)), msg, { config, fetch: f.fn })
+    expect(blocked).toEqual({ ok: false, error: 'blocked destination (private-address)' })
+    expect(f.calls).toHaveLength(0)
+    // An explicit resolver in the context wins over the default one.
+    const viaCtx = await webPushSender.send(channel('webpush', JSON.stringify(subscription())), msg, {
+      config,
+      fetch: f.fn,
+      lookup: async () => ['127.0.0.1'],
+    })
+    expect(viaCtx.ok).toBe(false)
+    expect(f.calls).toHaveLength(0)
+
+    const redirect = fakeFetch(() => new Response(null, { status: 307, headers: { location: 'http://169.254.169.254/latest/meta-data/' } }))
+    const r = await webPushSender.send(channel('webpush', JSON.stringify(subscription())), msg, { config, fetch: redirect.fn })
+    expect(r).toEqual({ ok: false, error: 'HTTP 307 (redirect not followed)', gone: false })
+    expect(redirect.calls).toHaveLength(1)
   })
 
   it('uses normal urgency below warning', async () => {
@@ -133,7 +175,7 @@ describe('webpush sender', () => {
   it('keeps the subscription on other errors and network failures', async () => {
     const f = fakeFetch(() => new Response('busy', { status: 429 }))
     const res = await webPushSender.send(channel('webpush', JSON.stringify(subscription())), msg, { config, fetch: f.fn })
-    expect(res).toMatchObject({ ok: false, gone: false })
+    expect(res).toEqual({ ok: false, error: 'HTTP 429', gone: false })
     const boom = (async () => {
       throw new Error('ECONNRESET')
     }) as unknown as typeof fetch
@@ -191,9 +233,12 @@ describe('line sender', () => {
     expect((await lineSender.send(channel('line', 'Ubad'), msg, { config, fetch: invalidTo.fn })).gone).toBe(true)
 
     const quota = fakeFetch(() => new Response(JSON.stringify({ message: 'You have reached your monthly limit.' }), { status: 429 }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const r = await lineSender.send(channel('line', 'U1'), msg, { config, fetch: quota.fn })
-    expect(r).toMatchObject({ ok: false, gone: false })
-    expect(r.error).toContain('monthly limit')
+    // The upstream message goes to the server log, never into the delivery record.
+    expect(r).toEqual({ ok: false, error: 'HTTP 429', gone: false })
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('monthly limit')
+    logSpy.mockRestore()
 
     const badToken = fakeFetch(() => new Response(JSON.stringify({ message: 'Authentication failed' }), { status: 401 }))
     expect((await lineSender.send(channel('line', 'U1'), msg, { config, fetch: badToken.fn })).gone).toBe(false)
@@ -222,8 +267,8 @@ describe('telegram sender', () => {
   it('treats 403 (bot blocked) as gone, 429 as retryable', async () => {
     const blocked = fakeFetch(() => Response.json({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }, { status: 403 }))
     const r1 = await telegramSender.send(channel('telegram', '1'), msg, { config, fetch: blocked.fn })
-    expect(r1).toMatchObject({ ok: false, gone: true })
-    expect(r1.error).toContain('bot was blocked')
+    expect(r1).toEqual({ ok: false, error: 'HTTP 403', gone: true })
+    expect(blocked.calls[0]!.redirect).toBe('manual')
 
     const notFound = fakeFetch(() => Response.json({ ok: false, description: 'Bad Request: chat not found' }, { status: 400 }))
     expect((await telegramSender.send(channel('telegram', '1'), msg, { config, fetch: notFound.fn })).gone).toBe(true)
@@ -274,15 +319,58 @@ describe('ntfy sender', () => {
     const f = fakeFetch()
     await ntfySender.send(channel('ntfy', 'https://ntfy.example.org/alerts_home'), msg, { config, fetch: f.fn })
     expect(f.calls[0]!.url).toBe('https://ntfy.example.org/')
+    expect(f.calls[0]!.redirect).toBe('manual')
     expect((JSON.parse(String(f.calls[0]!.body)) as { topic: string }).topic).toBe('alerts_home')
     expect(ntfyTarget('http://10.0.0.1/topic', 'https://ntfy.sh')).toBeNull()
     expect(ntfyTarget('bad topic!', 'https://ntfy.sh')).toBeNull()
+    expect(ntfyTarget('topic1', 'https://ntfy.sh')).toEqual({ server: 'https://ntfy.sh', topic: 'topic1', custom: false })
   })
 
-  it('reports HTTP errors without marking the topic gone', async () => {
-    const f = fakeFetch(() => new Response('rate limited', { status: 429 }))
+  it('refuses custom servers on private addresses and does not follow redirects', async () => {
+    const f = fakeFetch()
+    const r = await ntfySender.send(channel('ntfy', 'https://internal.evil.example/topic'), msg, { config, fetch: f.fn })
+    expect(r).toEqual({ ok: false, error: 'blocked destination (private-address)' })
+    expect(f.calls).toHaveLength(0)
+
+    // PoC from the review: a public "ntfy server" answers 302 to an internal admin URL.
+    const hop = fakeFetch((c) =>
+      c.url.startsWith('https://ntfy.example.org')
+        ? new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:18081/admin' } })
+        : new Response('INTERNAL-SECRET', { status: 403 }),
+    )
+    const r2 = await ntfySender.send(channel('ntfy', 'https://ntfy.example.org/topic'), msg, { config, fetch: hop.fn })
+    expect(r2).toEqual({ ok: false, error: 'HTTP 302 (redirect not followed)' })
+    expect(hop.calls.map((c) => c.url)).toEqual(['https://ntfy.example.org/'])
+  })
+
+  it('topic-only channels use the operator\'s NTFY_BASE_URL without a DNS check', async () => {
+    const lan = loadConfig({ NTFY_BASE_URL: 'http://ntfy.lan:8080' })
+    const f = fakeFetch()
+    const r = await ntfySender.send(channel('ntfy', 'topic1'), msg, { config: lan, fetch: f.fn, lookup: async () => ['10.0.0.2'] })
+    expect(r.ok).toBe(true)
+    expect(f.calls[0]!.url).toBe('http://ntfy.lan:8080/')
+  })
+
+  it('reports HTTP errors without the response body and without marking the topic gone', async () => {
+    const f = fakeFetch(() => new Response('INTERNAL-SECRET: admin panel token=abc123', { status: 429 }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const r = await ntfySender.send(channel('ntfy', 'topic1'), msg, { config, fetch: f.fn })
-    expect(r).toEqual({ ok: false, error: 'ntfy HTTP 429: rate limited' })
+    expect(r).toEqual({ ok: false, error: 'HTTP 429' })
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('INTERNAL-SECRET')
+    logSpy.mockRestore()
+  })
+
+  it('reads at most a bounded excerpt of an error body', async () => {
+    let pulled = 0
+    const endless = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++
+        c.enqueue(new TextEncoder().encode('x'.repeat(4096)))
+      },
+    })
+    const text = await readErrorBody(new Response(endless, { status: 500 }), 300)
+    expect(text).toBe('x'.repeat(300))
+    expect(pulled).toBeLessThan(5)
   })
 })
 
@@ -302,20 +390,24 @@ describe('email sender (Resend)', () => {
     expect(body.html).toContain('<html')
   })
 
-  it('surfaces Resend error messages and requires configuration', async () => {
+  it('reports Resend errors by status only and requires configuration', async () => {
     const f = fakeFetch(() => Response.json({ statusCode: 422, message: 'Invalid `to` field.' }, { status: 422 }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const r = await emailSender.send(channel('email', 'x@example.com'), msg, { config, fetch: f.fn })
-    expect(r).toEqual({ ok: false, error: 'Resend HTTP 422: Invalid `to` field.' })
+    expect(r).toEqual({ ok: false, error: 'HTTP 422' })
+    expect(logSpy.mock.calls.flat().join('\n')).toContain('Invalid `to` field.')
+    logSpy.mockRestore()
     expect(emailSender.isConfigured(loadConfig({ RESEND_API_KEY: 'k' }))).toBe(false)
-    const none = await sendEmail(f.fn, loadConfig({}), confirmationEmail('a@b.co', 'บ้าน', 'https://x/confirm'))
+    const none = await sendEmail(f.fn, loadConfig({}), confirmationEmail('a@b.co', 'https://x/confirm'))
     expect(none.ok).toBe(false)
   })
 
-  it('builds a Thai confirmation e-mail with the link', () => {
-    const mail = confirmationEmail('a@b.co', 'บ้าน <ทดสอบ>', 'https://flood.example.org/api/email/confirm?code=abc')
-    expect(mail.subject).toContain('ยืนยัน')
+  it('builds a Thai confirmation e-mail with the link and no user-supplied text', () => {
+    const mail = confirmationEmail('a@b.co', 'https://flood.example.org/api/email/confirm?code=abc')
+    expect(mail.subject).toBe('Flood Monitor: ยืนยันการรับการแจ้งเตือนน้ำท่วม')
     expect(mail.text).toContain('https://flood.example.org/api/email/confirm?code=abc')
-    expect(mail.html).toContain('บ้าน &lt;ทดสอบ&gt;')
+    expect(mail.text).toContain('ยืนยันการรับแจ้งเตือน')
+    expect(mail.html).toContain('href="https://flood.example.org/api/email/confirm?code=abc"')
   })
 })
 
@@ -331,6 +423,13 @@ describe('discord sender', () => {
     expect(body.username).toBe('Flood Monitor')
     expect(Array.from(body.content).length).toBeLessThanOrEqual(2000)
     expect(body.allowed_mentions).toEqual({ parse: [] })
+  })
+
+  it('does not follow redirects from the webhook URL', async () => {
+    const f = fakeFetch(() => new Response(null, { status: 301, headers: { location: 'http://10.0.0.1/' } }))
+    const r = await discordSender.send(channel('discord', hook), msg, { config, fetch: f.fn })
+    expect(r).toEqual({ ok: false, error: 'HTTP 301 (redirect not followed)', gone: false })
+    expect(f.calls[0]!.redirect).toBe('manual')
   })
 
   it('marks a deleted webhook (404) as gone', async () => {

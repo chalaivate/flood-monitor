@@ -1,4 +1,6 @@
+import { isIP } from 'node:net'
 import { ZodError } from 'zod'
+import { getConfig, type TrustProxy } from '../config'
 import { log } from './log'
 
 // JSON response helpers for route handlers. Error bodies are always `{ error }`
@@ -45,12 +47,49 @@ export function zodMessage(err: ZodError): string {
   return /[฀-๿]/.test(msg) ? msg : `${MSG.invalid}${issue.path.length ? ` (${issue.path.join('.')})` : ''}`
 }
 
+/**
+ * Read a request body with a hard byte cap. A declared Content-Length over the cap is
+ * refused before reading; otherwise the stream is read chunk by chunk and cancelled as
+ * soon as the total passes `maxBytes` (chunked uploads have no Content-Length), so an
+ * unauthenticated client cannot make the server buffer an arbitrarily large body.
+ * Throws HttpError(413).
+ */
+export async function readBodyCapped(req: Request, maxBytes: number): Promise<Uint8Array> {
+  const declared = req.headers.get('content-length')
+  if (declared !== null && declared.trim() !== '') {
+    const n = Number(declared)
+    if (!Number.isFinite(n) || n < 0) throw new HttpError(400, MSG.invalid)
+    if (n > maxBytes) throw new HttpError(413, MSG.tooLarge)
+  }
+  if (!req.body) return new Uint8Array(0)
+  const reader = req.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new HttpError(413, MSG.tooLarge)
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks)
+}
+
+/** Request body as UTF-8 text, capped like readBodyCapped. */
+export async function readTextCapped(req: Request, maxBytes: number): Promise<string> {
+  return new TextDecoder().decode(await readBodyCapped(req, maxBytes))
+}
+
 /** Parse a JSON request body with a size cap. Throws HttpError(400/413). */
 export async function readJson(req: Request, maxBytes = 64 * 1024): Promise<unknown> {
-  const declared = Number(req.headers.get('content-length') ?? '0')
-  if (declared > maxBytes) throw new HttpError(413, MSG.tooLarge)
-  const text = await req.text()
-  if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new HttpError(413, MSG.tooLarge)
+  const text = await readTextCapped(req, maxBytes)
   if (!text.trim()) return {}
   try {
     return JSON.parse(text) as unknown
@@ -78,15 +117,46 @@ export function handler<A extends unknown[]>(where: string, fn: (...args: A) => 
   }
 }
 
+/** A syntactically valid IP (IPv4-mapped IPv6 reduced to IPv4), else null. */
+function normalizeIp(raw: string | null | undefined): string | null {
+  const v = raw?.trim().replace(/^\[|\]$/g, '')
+  if (!v) return null
+  const mapped = v.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i)
+  const ip = mapped ? mapped[1]! : v
+  return isIP(ip) ? ip.toLowerCase() : null
+}
+
+/** First entry of a comma-separated header (X-Forwarded-For: client, proxy1, proxy2). */
+function firstOf(v: string | null): string | null {
+  return v?.split(',')[0] ?? null
+}
+
 /**
- * Best-effort client IP for rate limiting. Behind Cloudflare Tunnel / a reverse
- * proxy the edge sets these headers; directly exposed servers can be spoofed, so
- * the limiter is a soft abuse brake, not a security boundary.
+ * Client IP for rate limiting, read only from the header the configured proxy sets
+ * (TRUST_PROXY): `cloudflare` → CF-Connecting-IP (Cloudflare Tunnel / proxy),
+ * `vercel` → X-Real-IP, then the first X-Forwarded-For (Vercel overwrites both),
+ * `xff` → the first X-Forwarded-For (a reverse proxy that *replaces* the header),
+ * `none` → 'unknown'. Any other header is client-controlled and ignored, so it cannot
+ * be used to pick a fresh rate-limit bucket per request. Returns 'unknown' when the
+ * header is missing or not an IP.
  */
-export function clientIp(req: Request): string {
+export function clientIp(req: Request, trust: TrustProxy = getConfig().TRUST_PROXY): string {
   const h = req.headers
-  const first = (v: string | null) => v?.split(',')[0]?.trim() || null
-  return first(h.get('cf-connecting-ip')) ?? first(h.get('x-real-ip')) ?? first(h.get('x-forwarded-for')) ?? 'unknown'
+  let ip: string | null = null
+  switch (trust) {
+    case 'cloudflare':
+      ip = normalizeIp(h.get('cf-connecting-ip'))
+      break
+    case 'vercel':
+      ip = normalizeIp(h.get('x-real-ip')) ?? normalizeIp(firstOf(h.get('x-forwarded-for')))
+      break
+    case 'xff':
+      ip = normalizeIp(firstOf(h.get('x-forwarded-for')))
+      break
+    case 'none':
+      break
+  }
+  return ip ?? 'unknown'
 }
 
 /** Origin for links we generate (confirmation e-mails, redirects). */

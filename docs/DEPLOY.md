@@ -42,6 +42,7 @@ docker compose logs -f app      # ควรเห็น [ingest] bma-canal: ~312
 
 - เว็บอยู่ที่ `http://<เครื่อง>:3000` — ตัวดึงข้อมูลรันในเซิร์ฟเวอร์เดียวกัน (`EMBEDDED_WORKER=1`) ทุก `POLL_MINUTES` นาที
 - เปิดให้คนนอกเข้าถึงโดยไม่ต้องเปิด port: ใช้ Cloudflare Tunnel (มีตัวอย่าง service `cloudflared` ใน `docker-compose.yml`) แล้วตั้ง `PUBLIC_BASE_URL` เป็นโดเมนนั้น
+  และตั้ง `TRUST_PROXY=cloudflare` เพื่อให้จำกัดคำขอต่อ IP ของผู้ใช้จริงได้ (ดู [TRUST_PROXY](#trust_proxy-ip-ของผู้ใช้สำหรับการจำกัดคำขอ))
 - สำรองข้อมูล: `sqlite3 data/flood.db ".backup backup.db"`
 - ตรวจสุขภาพ: `curl http://localhost:3000/api/health`
 
@@ -67,6 +68,7 @@ EMBEDDED_WORKER=1 node .next/standalone/server.js   # คัดลอก .next/s
    RUN_ALERTS=0                # ให้เครื่องในไทยเป็นผู้ส่งแจ้งเตือน
    SOURCES=thaiwater-canal,thaiwater-wl,thaiwater-rain,thaiwater-road
    CRON_SECRET=<สุ่ม>           # vercel.json เรียก /api/cron/poll ทุก 10 นาที
+   # TRUST_PROXY ไม่ต้องตั้ง: บน Vercel ใช้ค่า vercel อัตโนมัติ
    + ค่าช่องทางแจ้งเตือน (VAPID_*, LINE_*, TELEGRAM_*, RESEND_API_KEY, EMAIL_FROM)
    ```
    บัญชี Vercel Hobby ตั้ง cron ได้วันละครั้ง — ให้แก้ schedule เป็นรายวัน หรือลบ `crons` แล้วใช้บริการภายนอก
@@ -116,6 +118,23 @@ npm run worker -- --relay https://<โดเมน>
 | Discord | ไม่ต้องตั้งค่า |
 
 ช่องทางที่ไม่ได้ตั้งค่าจะถูกซ่อนในหน้า "แจ้งเตือน" โดยอัตโนมัติ (อ่านจาก `/api/config/public`)
+
+---
+
+## TRUST_PROXY: IP ของผู้ใช้สำหรับการจำกัดคำขอ
+
+ระบบจำกัดจำนวนคำขอต่อ IP (สร้างจุดเฝ้าระวัง 10 ครั้ง/ชม., เพิ่มช่องทางแจ้งเตือน 20 ครั้ง/ชม., `/api/snapshot` 120 ครั้ง/นาที)
+และมีเพดานรวมทั้งเซิร์ฟเวอร์อีกชั้น (จุดเฝ้าระวังใหม่ 120 จุด/ชม., ช่องทางใหม่ 300 ช่องทาง/ชม.) ซึ่งทำงานแม้ไม่รู้ IP ของผู้ใช้
+IP จะอ่านจาก header ของ proxy ที่ระบุใน `TRUST_PROXY` เท่านั้น — header อื่นที่ผู้ใช้ส่งมาเองจะถูกละเลย
+
+| ค่า | ใช้เมื่อ | header ที่อ่าน |
+|---|---|---|
+| `cloudflare` | เข้าเว็บผ่าน Cloudflare Tunnel / Cloudflare proxy เท่านั้น | `CF-Connecting-IP` |
+| `vercel` | deploy บน Vercel (เว้นว่างไว้ระบบเลือกให้อัตโนมัติเมื่อมีตัวแปร `VERCEL`) | `X-Real-IP` แล้ว `X-Forwarded-For` ตัวแรก |
+| `xff` | อยู่หลัง reverse proxy ของคุณเอง (nginx/Caddy) ที่ **เขียนทับ** `X-Forwarded-For` ด้วย IP ผู้ใช้ เช่น nginx `proxy_set_header X-Forwarded-For $remote_addr;` | `X-Forwarded-For` ตัวแรก |
+| `none` (ค่าเริ่มต้นนอก Vercel) | ใช้ในวง LAN หรือไม่แน่ใจ | ไม่อ่าน — ไม่จำกัดต่อ IP แต่ยังมีเพดานรวม |
+
+ห้ามตั้ง `cloudflare` หรือ `xff` ถ้าพอร์ตของเซิร์ฟเวอร์เปิดให้อินเทอร์เน็ตเข้าถึงได้โดยตรง เพราะผู้ใช้จะปลอม header เพื่อหลบการจำกัดได้
 
 ---
 

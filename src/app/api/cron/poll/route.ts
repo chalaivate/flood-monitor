@@ -7,9 +7,10 @@ import { getConfig } from '@/lib/config'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-/** Fetching every source can take a while on a cold serverless instance. */
-export const maxDuration = 60
+/** Fetching every source (polite, one request at a time per host) plus alerts can take minutes. */
+export const maxDuration = 300
 
+/** In-process guard: overlapping cron calls on one instance return 409 instead of piling up. */
 const g = globalThis as typeof globalThis & { __floodCronRunning?: boolean }
 
 /**

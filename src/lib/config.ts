@@ -24,6 +24,10 @@ const num = (def: number) =>
     .transform((v) => (v === undefined || v.trim() === '' ? def : Number(v)))
     .pipe(z.number().finite())
 
+/** Reverse proxies whose client-IP header the rate limiter may trust. */
+export const TRUST_PROXY_VALUES = ['none', 'cloudflare', 'vercel', 'xff'] as const
+export type TrustProxy = (typeof TRUST_PROXY_VALUES)[number]
+
 const str = () =>
   z
     .string()
@@ -65,6 +69,12 @@ const schema = z.object({
   RUN_ALERTS: z.enum(['0', '1']).default('1'),
   /** 1 runs the poller inside the Next.js server process (all-in-one Docker). */
   EMBEDDED_WORKER: z.enum(['0', '1']).default('0'),
+  /**
+   * Which proxy header carries the real client IP for rate limiting: cloudflare
+   * (CF-Connecting-IP), vercel (X-Real-IP / X-Forwarded-For), xff (first X-Forwarded-For
+   * from a proxy that overwrites it) or none. Unset: vercel on Vercel, otherwise none.
+   */
+  TRUST_PROXY: z.enum(TRUST_PROXY_VALUES).default('none'),
 })
 
 export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[] }
@@ -84,7 +94,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           DEFAULT_LABEL: env.DEFAULT_LABEL || DEMO_DEFAULT.DEFAULT_LABEL,
         }
       : env
-  const parsed = schema.parse(withDemo)
+  const trustProxy = env.TRUST_PROXY?.trim().toLowerCase() || (env.VERCEL ? 'vercel' : 'none')
+  const parsed = schema.parse({ ...withDemo, TRUST_PROXY: trustProxy })
   const requested = parsed.SOURCES?.split(',').map((s) => s.trim()).filter(Boolean)
   const enabledSources = requested
     ? ALL_SOURCES.filter((s) => requested.includes(s))

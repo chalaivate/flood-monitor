@@ -1,9 +1,10 @@
 import { getConfig } from '@/lib/config'
-import { isValidLatLng } from '@/lib/geo'
+import { isInThailand, isValidLatLng } from '@/lib/geo'
 import { placeToSnapshotPlace } from '@/lib/pipeline'
 import { lateFetch } from '@/lib/server/context'
-import { handler, HttpError, json, MSG } from '@/lib/server/http'
+import { clientIp, handler, HttpError, json, MSG } from '@/lib/server/http'
 import { isPlaceId } from '@/lib/server/places'
+import { enforceClientLimit, LIMITS, rateLimiter } from '@/lib/server/rate-limit'
 import { adHocPlace, loadSnapshot } from '@/lib/server/snapshot'
 import { clamp, queryNumber } from '@/lib/server/validation'
 import { getStore } from '@/lib/store'
@@ -13,12 +14,15 @@ export const dynamic = 'force-dynamic'
 
 /** GET /api/snapshot?lat=&lng=&label=&r=&n=  |  ?place=<id> → DashboardSnapshot */
 export const GET = handler('snapshot', async (req: Request) => {
+  enforceClientLimit('snapshot', clientIp(req), LIMITS.snapshot)
   const config = getConfig()
   const store = await getStore()
   const q = new URL(req.url).searchParams
 
   const placeId = q.get('place')
   let place
+  // Ad-hoc coordinates share a capped upstream weather budget; saved places do not.
+  let weatherBudget: (() => boolean) | undefined
   if (placeId) {
     const stored = isPlaceId(placeId) ? await store.getPlace(placeId) : null
     if (!stored) throw new HttpError(404, MSG.placeNotFound)
@@ -27,7 +31,12 @@ export const GET = handler('snapshot', async (req: Request) => {
     const lat = queryNumber(q, 'lat')
     const lng = queryNumber(q, 'lng')
     if ((lat === undefined) !== (lng === undefined)) throw new HttpError(400, 'กรุณาระบุทั้งละติจูดและลองจิจูด')
-    if (lat !== undefined && lng !== undefined && !isValidLatLng(lat, lng)) throw new HttpError(400, 'พิกัดไม่ถูกต้อง')
+    if (lat !== undefined && lng !== undefined) {
+      if (!isValidLatLng(lat, lng)) throw new HttpError(400, 'พิกัดไม่ถูกต้อง')
+      // Data and alerts cover Thailand only; this also bounds the weather grid cells
+      // (and so the upstream calls) a caller can make the server request.
+      if (!isInThailand(lat, lng)) throw new HttpError(400, 'ตำแหน่งต้องอยู่ในประเทศไทย')
+    }
     const r = queryNumber(q, 'r')
     const n = queryNumber(q, 'n')
     if ((r !== undefined && !Number.isFinite(r)) || (n !== undefined && !Number.isFinite(n))) {
@@ -40,8 +49,10 @@ export const GET = handler('snapshot', async (req: Request) => {
       radiusKm: r === undefined ? undefined : clamp(r, 0.5, 20),
       maxStations: n === undefined ? undefined : Math.round(clamp(n, 1, 8)),
     })
+    weatherBudget = () => rateLimiter().take('weather:adhoc', LIMITS.weatherAdHoc).ok
   }
 
-  const snapshot = await loadSnapshot(store, config, place, { fetch: lateFetch })
+  // Weather is looked up by 0.02° grid cell (cachedWeather snaps the coordinates).
+  const snapshot = await loadSnapshot(store, config, place, { fetch: lateFetch, weatherBudget })
   return json(snapshot, { headers: { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=60' } })
 })
