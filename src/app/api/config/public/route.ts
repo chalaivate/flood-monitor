@@ -17,6 +17,7 @@ export const GET = handler('config/public', async () => {
       telegramBot: c.TELEGRAM_BOT_USERNAME?.replace(/^@/, '') ?? null,
       lineAddFriendUrl: c.LINE_ADD_FRIEND_URL ?? null,
       vapidPublicKey: c.VAPID_PUBLIC_KEY ?? null,
+      rainviewer: c.RAINVIEWER === '1',
     },
     { headers: { 'Cache-Control': 'public, max-age=300' } },
   )

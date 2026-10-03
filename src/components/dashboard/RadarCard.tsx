@@ -3,7 +3,14 @@
 import dynamic from 'next/dynamic'
 import { useEffect, useState } from 'react'
 import type { RadarImage } from '@/lib/types'
+import { usePublicConfig } from '@/lib/ui/public-config'
 import { Card } from '../Card'
+
+/** Official radar pages, shown as links when no embeddable radar is available. */
+const RADAR_LINKS = [
+  { href: 'https://weather.tmd.go.th/composite/index_composite.html', label: 'เรดาร์รวมกรมอุตุนิยมวิทยา' },
+  { href: 'https://weather.bangkok.go.th/radar/RadarAnimation.aspx', label: 'เรดาร์ กทม. (ภาพเคลื่อนไหว)' },
+]
 
 const RadarMap = dynamic(() => import('../map/RadarMap'), {
   ssr: false,
@@ -44,9 +51,14 @@ export function RadarCard({
       for (const im of probes) im.onerror = null
     }
   }, [urls])
+  const rainviewer = usePublicConfig().config?.rainviewer !== false
   const visible = images.filter((r) => !broken.includes(r.id))
-  const active = tab === RV_TAB || visible.some((r) => r.id === tab) ? tab : RV_TAB
-  const tabs = [{ id: RV_TAB, label: 'เคลื่อนไหว' }, ...visible.map((r) => ({ id: r.id, label: shortTitle(r.title) }))]
+  const fallbackTab = rainviewer ? RV_TAB : (visible[0]?.id ?? RV_TAB)
+  const active = (tab === RV_TAB && rainviewer) || visible.some((r) => r.id === tab) ? tab : fallbackTab
+  const tabs = [
+    ...(rainviewer ? [{ id: RV_TAB, label: 'เคลื่อนไหว' }] : []),
+    ...visible.map((r) => ({ id: r.id, label: shortTitle(r.title) })),
+  ]
   const img = visible.find((r) => r.id === active)
   // Cache-bust BMA images on their refresh cadence.
   const bucket = img ? Math.floor(nowMs / (Math.max(1, img.refreshMinutes) * 60_000)) : 0
@@ -91,11 +103,26 @@ export function RadarCard({
               ที่มา: {img.source} · ปรับปรุงทุก {img.refreshMinutes} นาที
             </figcaption>
           </figure>
-        ) : (
+        ) : rainviewer ? (
           <RadarMap lat={lat} lng={lng} radiusKm={radiusKm} nowMs={nowMs} />
+        ) : (
+          <div className="grid h-full place-items-center rounded-xl border border-border bg-card-2 p-4 text-center text-sm text-text-2">
+            <div>
+              <p className="mb-3">ไม่มีภาพเรดาร์ที่แสดงในหน้านี้ได้ในขณะนี้ ดูเรดาร์ทางการได้ที่</p>
+              <ul className="space-y-1">
+                {RADAR_LINKS.map((l) => (
+                  <li key={l.href}>
+                    <a href={l.href} target="_blank" rel="noopener noreferrer" className="font-medium text-accent underline underline-offset-2">
+                      {l.label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
         )}
       </div>
-      {!img && (
+      {!img && rainviewer && (
         <p className="mt-2 text-xs text-muted">
           สีฟ้า–น้ำเงิน = ฝนเล็กน้อยถึงปานกลาง · สีเหลือง–แดง = ฝนหนัก · ภาพย้อนหลังประมาณ 2 ชม.
         </p>

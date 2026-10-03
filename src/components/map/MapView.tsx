@@ -141,6 +141,7 @@ export function MapView() {
 
         {panelOpen && (
           <div id="map-panel-body" className="border-t border-border px-4 pt-3 pb-4">
+            {cfg.config?.rainviewer !== false && (
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -157,6 +158,7 @@ export function MapView() {
                 {radar.kind === 'error' && 'โหลดเรดาร์ไม่ได้ในขณะนี้'}
               </span>
             </div>
+            )}
 
             <ul className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-sm text-text-2" aria-label="สัญลักษณ์ระดับ">
               {LEVEL_LADDER.map((l) => (

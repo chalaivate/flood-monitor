@@ -46,6 +46,7 @@ function normalise(c: PublicConfig): PublicConfig {
     telegramBot: c?.telegramBot ?? null,
     lineAddFriendUrl: c?.lineAddFriendUrl ?? null,
     vapidPublicKey: c?.vapidPublicKey ?? null,
+    rainviewer: c?.rainviewer !== false,
   }
 }
 

@@ -15,6 +15,8 @@ export interface PublicConfig {
   telegramBot: string | null
   lineAddFriendUrl: string | null
   vapidPublicKey: string | null
+  /** Animated RainViewer radar allowed (operator setting, licence-dependent). */
+  rainviewer: boolean
 }
 
 export type { ChannelLink, MapStation, PublicChannel, PublicPlace }

@@ -67,6 +67,11 @@ const schema = z.object({
   THAIWATER_PROVINCES: z.string().default('10,11,12,13'),
   /** 0 disables alert evaluation in this process (when another process owns alerting). */
   RUN_ALERTS: z.enum(['0', '1']).default('1'),
+  /**
+   * 1 shows the animated RainViewer radar. RainViewer's free API is for personal/educational use
+   * only (since 2026-01-01): set 0 for public or commercial deployments without an agreement.
+   */
+  RAINVIEWER: z.enum(['0', '1']).default('1'),
   /** 1 runs the poller inside the Next.js server process (all-in-one Docker). */
   EMBEDDED_WORKER: z.enum(['0', '1']).default('0'),
   /**
