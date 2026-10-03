@@ -129,6 +129,25 @@ async function body<T = Record<string, unknown>>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
+/** Run `fn` with some env vars changed (config cache reset before and after). */
+async function withEnv<T>(over: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const before: Record<string, string | undefined> = {}
+  for (const [k, v] of Object.entries(over)) {
+    before[k] = process.env[k]
+    process.env[k] = v
+  }
+  resetConfigCache()
+  try {
+    return await fn()
+  } finally {
+    for (const [k, v] of Object.entries(before)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    resetConfigCache()
+  }
+}
+
 async function createPlace(extra: Record<string, unknown> = {}, ip = '203.0.113.1') {
   const res = await placesRoute.POST(
     req('/api/places', { json: { label: 'บ้านทดสอบ', lat: 13.7563, lng: 100.5018, ...extra }, headers: { 'x-forwarded-for': ip } }),
@@ -464,14 +483,18 @@ describe('channels API', () => {
     const code = link![1]!
 
     // GET (what a mail scanner does) shows the page but verifies nothing.
-    const page = await emailConfirmRoute.GET(req(`/api/email/confirm?code=${code}`))
+    const page = await emailConfirmRoute.GET(req(`/api/email/confirm?code=${code}`, { headers: { host: 'evil.example' } }))
     expect(page.status).toBe(200)
     expect(page.headers.get('content-type')).toContain('text/html')
     expect(page.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(page.headers.get('content-security-policy')).toContain("form-action 'self';")
     const html = await page.text()
     expect(html).toContain('ยืนยันการรับแจ้งเตือน')
-    expect(html).toContain('method="post"')
+    expect(html).toContain('method="post" action="/api/email/confirm"')
     expect(html).toContain(`name="code" value="${code}"`)
+    // Links on the page are relative: never the bind address or a client-chosen Host.
+    expect(html).toContain('href="/alerts"')
+    expect(html).not.toMatch(/localhost|evil\.example|https?:\/\//)
     expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
 
     const badPage = await emailConfirmRoute.GET(req('/api/email/confirm?code=wrong-code-wrong-code'))
@@ -482,11 +505,19 @@ describe('channels API', () => {
       req('/api/email/confirm', { method: 'POST', body: `code=${encodeURIComponent(c)}`, headers: { 'content-type': 'application/x-www-form-urlencoded' } })
     const bad = await emailConfirmRoute.POST(form('wrong-code-wrong-code'))
     expect(bad.status).toBe(303)
-    expect(bad.headers.get('location')).toBe('https://flood.example.org/alerts?confirmed=0')
+    expect(bad.headers.get('location')).toBe('/alerts?confirmed=0')
+
+    // The code counts only in the form body, never in the query string.
+    const viaQuery = await emailConfirmRoute.POST(
+      req(`/api/email/confirm?code=${code}`, { method: 'POST', body: '', headers: { 'content-type': 'application/x-www-form-urlencoded' } }),
+    )
+    expect(viaQuery.headers.get('location')).toBe('/alerts?confirmed=0')
+    expect((await store.listChannels(id))[0]).toMatchObject({ verified: false })
 
     const ok = await emailConfirmRoute.POST(form(code))
     expect(ok.status).toBe(303)
-    expect(ok.headers.get('location')).toBe('https://flood.example.org/alerts?confirmed=1')
+    // Relative: correct behind any proxy, with or without PUBLIC_BASE_URL.
+    expect(ok.headers.get('location')).toBe('/alerts?confirmed=1')
     const [ch] = await store.listChannels(id)
     expect(ch).toMatchObject({ verified: true, linkCode: null })
     // Single use.
@@ -511,6 +542,60 @@ describe('channels API', () => {
     expect((await add('second@example.com')).status).toBe(201)
     const pending = (await store.listChannels(id)).filter((c) => c.type === 'email' && !c.verified)
     expect(pending.map((c) => c.target)).toEqual(['second@example.com'])
+  })
+
+  it('limits by mailbox: +tags, Gmail dots and googlemail.com share one bucket', async () => {
+    const { id, token } = await createPlace()
+    const add = (target: string) => channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'email', target } }), ctx({ id }))
+    expect((await add('victim@gmail.com')).status).toBe(201)
+    for (const alias of ['vic.tim+1@gmail.com', 'VICTIM+news@googlemail.com', 'v.i.c.t.i.m@GMAIL.com']) {
+      const res = await add(alias)
+      expect(res.status, alias).toBe(429)
+      expect((await body(res)).error).toContain('ที่อยู่นี้')
+    }
+    // +tags count for every provider; dots only for Gmail.
+    expect((await add('owner@example.org')).status).toBe(201)
+    expect((await add('owner+x@example.org')).status).toBe(429)
+    expect((await add('own.er@example.org')).status).toBe(201)
+    expect(outbound.filter((c) => c.url === 'https://api.resend.com/emails')).toHaveLength(3)
+  })
+
+  it('treats a confirmed mailbox as already added, and caps e-mail channels per place', async () => {
+    const { id, token } = await createPlace()
+    const add = (target: string) => channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'email', target } }), ctx({ id }))
+    const confirm = async () => {
+      const [pending] = (await store.listChannels(id)).filter((c) => c.type === 'email' && !c.verified)
+      await store.updateChannel({ ...pending!, verified: true, linkCode: null })
+    }
+    const first = await body<{ channel: { id: string } }>(await add('owner@gmail.com'))
+    await confirm()
+    const same = await add('o.w.n.e.r+alerts@googlemail.com')
+    expect(same.status).toBe(200)
+    expect((await body<{ channel: { id: string } }>(same)).channel.id).toBe(first.channel.id)
+
+    expect((await add('second@example.org')).status).toBe(201)
+    await confirm()
+    expect((await add('third@example.org')).status).toBe(201)
+    await confirm()
+    const fourth = await add('fourth@example.org')
+    expect(fourth.status).toBe(400)
+    expect((await body(fourth)).error).toContain('สูงสุด 3 อีเมล')
+  })
+
+  it('limits confirmation e-mails per place, whatever the addresses', async () => {
+    const { id, token } = await createPlace()
+    const add = (target: string) => channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type: 'email', target } }), ctx({ id }))
+    for (let i = 0; i < LIMITS.emailConfirmPlace.capacity; i++) expect((await add(`person${i}@example.org`)).status).toBe(201)
+    const res = await add('one-more@example.org')
+    expect(res.status).toBe(429)
+    expect((await body(res)).error).toContain('จุดเฝ้าระวังนี้')
+    // Another place is not affected.
+    const other = await createPlace()
+    const ok = await channelsRoute.POST(
+      req(`/api/places/${other.id}/channels`, { token: other.token, json: { type: 'email', target: 'one-more@example.org' } }),
+      ctx({ id: other.id }),
+    )
+    expect(ok.status).toBe(201)
   })
 })
 
@@ -709,6 +794,32 @@ describe('machine endpoints', () => {
     expect(health.find((h) => h.source === 'bma-canal')?.latestObservationAt).toBe(payload.results[0]!.readings[0]!.observedAt)
   })
 
+  it('ingest prunes readings older than HISTORY_HOURS after the response, with or without alerts', async () => {
+    for (const runAlerts of ['1', '0']) {
+      store = new SqliteStore(':memory:')
+      __setStoreForTests(store)
+      await withEnv({ RUN_ALERTS: runAlerts }, async () => {
+        const old = { stationId: nearStation.id, observedAt: new Date(Date.now() - 80 * 3_600_000).toISOString(), waterLevel: 0.4, freeboard: 0.6 }
+        await store.upsertStations([nearStation])
+        await store.insertReadings([old])
+        const since = new Date(Date.now() - 100 * 3_600_000).toISOString()
+        expect((await store.history([nearStation.id], since))[nearStation.id]).toHaveLength(1)
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+        const fresh = { ...payload, results: [{ ...payload.results[0]!, readings: [{ stationId: nearStation.id, observedAt: new Date().toISOString(), waterLevel: 0.5, freeboard: 0.5 }] }] }
+        const res = await ingestRoute.POST(req('/api/ingest', { json: fresh, token: 'ingest-token' }))
+        expect(res.status).toBe(200)
+        expect((await body(res)).alerts).toBe(runAlerts === '1' ? 'scheduled' : null)
+        await vi.waitFor(async () => {
+          const series = (await store.history([nearStation.id], since))[nearStation.id] ?? []
+          expect(series.map((p) => p.observedAt)).not.toContain(old.observedAt)
+          expect(series).toHaveLength(1)
+        })
+        await vi.waitFor(() => expect(logSpy.mock.calls.flat().join('\n')).toContain('[ingest] pruned 1 reading(s) older than 72 h'))
+        logSpy.mockRestore()
+      })
+    }
+  })
+
   it('gives the long-running machine endpoints a 300 s budget', () => {
     expect(cronRoute.maxDuration).toBe(300)
     expect(ingestRoute.maxDuration).toBe(300)
@@ -812,6 +923,43 @@ describe('public read endpoints', () => {
       rainviewer: true,
     })
     expect(JSON.stringify(b)).not.toMatch(/secret|line-token|re_test/)
+  })
+
+  it('does not offer e-mail without PUBLIC_BASE_URL (links are never built from the request)', async () => {
+    const { id, token } = await createPlace()
+    await withEnv({ PUBLIC_BASE_URL: '' }, async () => {
+      const cfg = await body<{ channels: Record<string, boolean> }>(await configRoute.GET())
+      expect(cfg.channels.email).toBe(false)
+      const res = await channelsRoute.POST(
+        req(`/api/places/${id}/channels`, { token, json: { type: 'email', target: 'owner@example.com' }, headers: { host: 'flood.example.org' } }),
+        ctx({ id }),
+      )
+      expect(res.status).toBe(400)
+      expect((await body(res)).error).toContain('ยังไม่เปิดใช้งาน')
+    })
+    expect(outbound.filter((c) => c.url === 'https://api.resend.com/emails')).toEqual([])
+  })
+
+  it('advertises LINE / Telegram only with their full settings, bot details included', async () => {
+    const cfg = () => configRoute.GET().then((r) => body<{ channels: Record<string, boolean>; telegramBot: string | null; lineAddFriendUrl: string | null }>(r))
+    await withEnv({ TELEGRAM_WEBHOOK_SECRET: '', LINE_ADD_FRIEND_URL: '' }, async () => {
+      const c = await cfg()
+      expect(c.channels).toMatchObject({ telegram: false, line: false, ntfy: true })
+      expect(c.telegramBot).toBeNull()
+      expect(c.lineAddFriendUrl).toBeNull()
+      const { id, token } = await createPlace()
+      for (const type of ['telegram', 'line']) {
+        const res = await channelsRoute.POST(req(`/api/places/${id}/channels`, { token, json: { type } }), ctx({ id }))
+        expect(res.status, type).toBe(400)
+      }
+      expect(await store.listChannels(id)).toEqual([])
+    })
+    await withEnv({ TELEGRAM_BOT_USERNAME: '', LINE_CHANNEL_SECRET: '' }, async () => {
+      const c = await cfg()
+      expect(c.channels).toMatchObject({ telegram: false, line: false })
+      expect(c.telegramBot).toBeNull()
+      expect(c.lineAddFriendUrl).toBeNull()
+    })
   })
 
   it('health reports ingest status', async () => {

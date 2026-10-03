@@ -5,7 +5,7 @@ import { loadConfig } from '@/lib/config'
 import { discordSender, isDiscordWebhookUrl } from '@/lib/notify/discord'
 import { emailSender, sendEmail, confirmationEmail } from '@/lib/notify/email'
 import { htmlEmail, plainText, titleLine, truncate } from '@/lib/notify/format'
-import { availableChannels, getSenders } from '@/lib/notify'
+import { availableChannels, channelConfigWarnings, getSenders, missingChannelSettings } from '@/lib/notify'
 import { lineRecipientGone, lineSender } from '@/lib/notify/line'
 import { ntfySender, ntfyTarget } from '@/lib/notify/ntfy'
 import { telegramSender } from '@/lib/notify/telegram'
@@ -54,19 +54,22 @@ function fakeFetch(respond: (call: Call) => Response | Promise<Response> = () =>
 }
 
 const vapid = webpush.generateVAPIDKeys()
-const config = loadConfig({
+const env: Record<string, string> = {
   VAPID_PUBLIC_KEY: vapid.publicKey,
   VAPID_PRIVATE_KEY: vapid.privateKey,
   VAPID_SUBJECT: 'mailto:ops@example.org',
   LINE_CHANNEL_ACCESS_TOKEN: 'line-token',
   LINE_CHANNEL_SECRET: 'line-secret',
+  LINE_ADD_FRIEND_URL: 'https://lin.ee/abcdef',
   TELEGRAM_BOT_TOKEN: '123:ABC',
   TELEGRAM_BOT_USERNAME: 'flood_bot',
   TELEGRAM_WEBHOOK_SECRET: 'tg-secret',
   RESEND_API_KEY: 're_test',
   EMAIL_FROM: 'Flood Monitor <alerts@example.org>',
   NTFY_BASE_URL: 'https://ntfy.sh',
-})
+  PUBLIC_BASE_URL: 'https://flood.example.org',
+}
+const config = loadConfig(env)
 
 const msg: NotifyMessage = {
   title: 'วิกฤต: ประเวศฯ ลาดกระบัง ห่างตลิ่ง 0.08 ม.',
@@ -464,5 +467,39 @@ describe('getSenders / availableChannels', () => {
     })
     expect(availableChannels(config)).toEqual({ webpush: true, line: true, telegram: true, ntfy: true, email: true, discord: true })
     expect(availableChannels(loadConfig({ TELEGRAM_BOT_TOKEN: 't' })).telegram).toBe(false)
+  })
+
+  it('offers a channel only when every setting it needs is present', () => {
+    const without = (key: string) => loadConfig({ ...env, [key]: '' })
+    // Each of these alone makes linking or confirming impossible.
+    for (const key of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET', 'TELEGRAM_BOT_USERNAME']) {
+      expect(availableChannels(without(key)).telegram, key).toBe(false)
+    }
+    for (const key of ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'LINE_ADD_FRIEND_URL']) {
+      expect(availableChannels(without(key)).line, key).toBe(false)
+    }
+    // E-mail confirmation links need the public URL; it is never taken from the request.
+    for (const key of ['RESEND_API_KEY', 'EMAIL_FROM', 'PUBLIC_BASE_URL']) {
+      expect(availableChannels(without(key)).email, key).toBe(false)
+    }
+    expect(availableChannels(loadConfig({ ...env, PUBLIC_BASE_URL: 'flood.example.org' })).email).toBe(false)
+    expect(availableChannels(loadConfig({ ...env, PUBLIC_BASE_URL: 'https://flood.example.org/' })).email).toBe(true)
+    expect(missingChannelSettings(without('LINE_ADD_FRIEND_URL'), 'line')).toEqual(['LINE_ADD_FRIEND_URL'])
+  })
+
+  it('warns about half-configured channels by variable name, and only those', () => {
+    expect(channelConfigWarnings(config)).toEqual([])
+    // Nothing set: the channel is simply off. PUBLIC_BASE_URL alone (alert links) is no intent to use e-mail.
+    expect(channelConfigWarnings(loadConfig({}))).toEqual([])
+    expect(channelConfigWarnings(loadConfig({ PUBLIC_BASE_URL: 'https://flood.example.org' }))).toEqual([])
+    const warnings = channelConfigWarnings(
+      loadConfig({ TELEGRAM_BOT_TOKEN: 't', LINE_CHANNEL_ACCESS_TOKEN: 'l', LINE_CHANNEL_SECRET: 's', RESEND_API_KEY: 'k', EMAIL_FROM: 'a@b.example' }),
+    )
+    expect(warnings).toHaveLength(3)
+    expect(warnings.find((w) => w.startsWith('Telegram'))).toContain('TELEGRAM_WEBHOOK_SECRET, TELEGRAM_BOT_USERNAME are not set')
+    expect(warnings.find((w) => w.startsWith('LINE'))).toContain('LINE_ADD_FRIEND_URL is not set')
+    expect(warnings.find((w) => w.startsWith('E-mail'))).toContain('PUBLIC_BASE_URL is not set')
+    const badUrl = channelConfigWarnings(loadConfig({ RESEND_API_KEY: 'k', EMAIL_FROM: 'a@b.example', PUBLIC_BASE_URL: 'flood.example.org' }))
+    expect(badUrl[0]).toContain('must be an http(s) URL')
   })
 })

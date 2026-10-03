@@ -102,7 +102,11 @@ Public (no auth):
 - `GET /api/stations` → `{ generatedAt, stations: MapStation[] }` where
   `MapStation = { id, kind, source, name, shortName, district, lat, lng, level, stale, observedAt, waterLevel, bankLevel, freeboard, rain24h, rain1h, roadFloodCm, officialStatus }`.
 - `GET /api/history?ids=a,b&hours=48` → `{ series: Record<stationId, HistoryPoint[]> }` (≤ 8 ids, ≤ 168 h).
-- `GET /api/config/public` → `{ dataMode, defaultPlace: {label,lat,lng}, pollMinutes, channels: Record<ChannelType, boolean>, telegramBot: string|null, lineAddFriendUrl: string|null, vapidPublicKey: string|null }`.
+- `GET /api/config/public` → `{ dataMode, defaultPlace: {label,lat,lng}, pollMinutes, channels: Record<ChannelType, boolean>, telegramBot: string|null, lineAddFriendUrl: string|null, vapidPublicKey: string|null, rainviewer: boolean }`.
+  A channel is `true` only when its full settings are present (`notify/index.ts` `CHANNEL_SETTINGS`: LINE token + secret +
+  `LINE_ADD_FRIEND_URL`; Telegram token + webhook secret + bot username; e-mail Resend key + `EMAIL_FROM` + a valid
+  `PUBLIC_BASE_URL`); `telegramBot`, `lineAddFriendUrl`, `vapidPublicKey` are null unless that channel is offered.
+  Half-configured channels are logged once at server/worker start.
 - `GET /api/health` → `{ ok, dataMode, lastIngestAt, lastAlertsAt, sources: SourceHealth[] }`.
 - `GET /api/radar/bma/[site]` (`nongchok` | `nongkhaem`) → proxied JPEG (cached ~4 min), 502 when unreachable.
 
@@ -111,19 +115,30 @@ Place management (`Authorization: Bearer <manageToken>` for everything except cr
 - `GET|PATCH|DELETE /api/places/[id]`.
 - `GET|POST /api/places/[id]/channels`, `DELETE /api/places/[id]/channels/[channelId]`.
   POST body `{ type, target? }` → `{ channel: PublicChannel, link?: { code, url?, instructions } }`.
-  webpush/ntfy/discord verified immediately; telegram/line need a link code sent to the bot;
-  email needs the confirmation link.
+  webpush/ntfy/discord verified immediately; telegram/line need an 8-char link code (60 min) sent to the bot;
+  email needs the confirmation link. E-mail limits use a normalised mailbox key (lower-case, no `+tag`,
+  Gmail dots removed, googlemail → gmail): ≤ 3 e-mail channels per place, 1 confirmation mail per mailbox
+  per 15 min and 3 per day, 5 per place per day, plus a server-wide cap; an already confirmed mailbox
+  returns the existing channel.
 - `POST /api/places/[id]/test` → sends a test message → `{ deliveries }`.
 - `GET /api/places/[id]/events?limit=50` → `{ events: AlertEvent[] }`.
 
 Webhooks / machine:
 - `POST /api/line/webhook` (X-Line-Signature HMAC-SHA256 with `LINE_CHANNEL_SECRET`): follow → greeting;
-  text containing a 6-char link code → verify LINE channel; "สถานะ" → reply current situation.
+  text containing an 8-char link code → verify LINE channel; "สถานะ" → reply current situation.
 - `POST /api/telegram/webhook` (header `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET`):
   `/start <code>` links; `/status` replies.
-- `GET /api/email/confirm?code=` → verifies email channel, redirects to `/alerts?confirmed=1`.
+- `GET /api/email/confirm?code=` → HTML page with a button only (mail scanners fetch links; a GET never verifies).
+  `POST /api/email/confirm` (form field `code` in the body; the query string is ignored) → verifies, 303 to the
+  relative `/alerts?confirmed=1|0`.
 - `GET|POST /api/cron/poll` (Bearer `CRON_SECRET`) → `runCycle` (alerts only if `RUN_ALERTS` ≠ 0).
-- `POST /api/ingest` (Bearer `INGEST_TOKEN`) body `{ results: SourceFetchResult[] }` → `{ inserted }`.
+- `POST /api/ingest` (Bearer `INGEST_TOKEN`) body `{ results: SourceFetchResult[], failures?: {source, error, attemptedAt?}[] }`
+  → `{ ok, inserted, sources, alerts: 'scheduled' | null }`. Alerts (when `RUN_ALERTS=1`) and pruning of readings
+  older than `HISTORY_HOURS` run after the response (`after()`).
+
+Weather (`/api/snapshot`): Open-Meteo results are cached per 0.02° (~2 km) grid cell for 10 min. Every upstream call,
+saved places included, counts against a global budget (400/h; ad-hoc map lookups also against 200/h); when the
+budget is spent or the provider fails, the last good value up to 60 min old is served (the UI shows its age).
 
 `PublicPlace` = `Place` without `manageTokenHash`. `PublicChannel` = `Channel` with `target` masked
 (e.g. `te***@gmail.com`, `ntfy: fm-***`, web push → device label) and without `linkCode` once verified.

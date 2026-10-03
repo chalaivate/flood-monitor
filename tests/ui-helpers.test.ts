@@ -9,7 +9,7 @@ import { parseRainViewer } from '@/lib/ui/rainviewer'
 import { countByFilter, DEFAULT_KIND_FILTERS, filterStations, nearestWaterKm, suggestRadiusKm, waterStationsWithin } from '@/lib/ui/stations'
 import { thresholdForm, validateThresholds } from '@/lib/ui/thresholds'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN } from '@/lib/types'
-import snapshotJson from './fixtures/snapshot-sample.json'
+import snapshotJson from '@/app/dev/preview/snapshot-sample.json'
 import stationsJson from './fixtures/stations-sample.json'
 
 const snapshot = snapshotJson as unknown as DashboardSnapshot

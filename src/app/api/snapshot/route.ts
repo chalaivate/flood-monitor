@@ -4,9 +4,10 @@ import { placeToSnapshotPlace } from '@/lib/pipeline'
 import { lateFetch } from '@/lib/server/context'
 import { clientIp, handler, HttpError, json, MSG } from '@/lib/server/http'
 import { isPlaceId } from '@/lib/server/places'
-import { enforceClientLimit, LIMITS, rateLimiter } from '@/lib/server/rate-limit'
+import { enforceClientLimit, LIMITS } from '@/lib/server/rate-limit'
 import { adHocPlace, loadSnapshot } from '@/lib/server/snapshot'
 import { clamp, queryNumber } from '@/lib/server/validation'
+import { weatherBudget } from '@/lib/server/weather-cache'
 import { getStore } from '@/lib/store'
 
 export const runtime = 'nodejs'
@@ -21,8 +22,9 @@ export const GET = handler('snapshot', async (req: Request) => {
 
   const placeId = q.get('place')
   let place
-  // Ad-hoc coordinates share a capped upstream weather budget; saved places do not.
-  let weatherBudget: (() => boolean) | undefined
+  // Every upstream weather request counts against a server-wide budget; ad-hoc
+  // coordinates (map browsing) also against their own smaller share of it.
+  let budget = weatherBudget('place')
   if (placeId) {
     const stored = isPlaceId(placeId) ? await store.getPlace(placeId) : null
     if (!stored) throw new HttpError(404, MSG.placeNotFound)
@@ -49,10 +51,10 @@ export const GET = handler('snapshot', async (req: Request) => {
       radiusKm: r === undefined ? undefined : clamp(r, 0.5, 20),
       maxStations: n === undefined ? undefined : Math.round(clamp(n, 1, 8)),
     })
-    weatherBudget = () => rateLimiter().take('weather:adhoc', LIMITS.weatherAdHoc).ok
+    budget = weatherBudget('adhoc')
   }
 
   // Weather is looked up by 0.02° grid cell (cachedWeather snaps the coordinates).
-  const snapshot = await loadSnapshot(store, config, place, { fetch: lateFetch, weatherBudget })
+  const snapshot = await loadSnapshot(store, config, place, { fetch: lateFetch, weatherBudget: budget })
   return json(snapshot, { headers: { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=60' } })
 })

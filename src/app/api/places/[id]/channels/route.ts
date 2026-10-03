@@ -3,7 +3,7 @@ import { availableChannels } from '@/lib/notify'
 import { confirmationEmail, sendEmail } from '@/lib/notify/email'
 import { parseSubscription } from '@/lib/notify/webpush'
 import { hashToken } from '@/lib/server/auth'
-import { emailConfirmCode, generateLinkCode, isLinkCodeExpired, validateChannelTarget } from '@/lib/server/channels'
+import { emailConfirmCode, generateLinkCode, isLinkCodeExpired, mailboxKey, validateChannelTarget } from '@/lib/server/channels'
 import { lateFetch } from '@/lib/server/context'
 import { clientIp, handler, HttpError, json, MSG, publicOrigin, readJson, type RouteCtx } from '@/lib/server/http'
 import { log } from '@/lib/server/log'
@@ -20,6 +20,8 @@ export const dynamic = 'force-dynamic'
 type Ctx = RouteCtx<{ id: string }>
 
 const MAX_CHANNELS_PER_PLACE = 10
+/** Each e-mail channel costs mail quota on every alert. */
+const MAX_EMAIL_CHANNELS_PER_PLACE = 3
 
 /** GET /api/places/[id]/channels → { channels: PublicChannel[] } */
 export const GET = handler('channels GET', async (req: Request, ctx: Ctx) => {
@@ -69,12 +71,17 @@ export const POST = handler('channels POST', async (req: Request, ctx: Ctx) => {
     const same = existing.find((c) => c.type === input.type && c.target === target.target)
     if (same) return respond(same, 200)
   } else if (input.type === 'email') {
-    const same = existing.find((c) => c.type === 'email' && c.target === target.target && c.verified)
+    // Compared by mailbox: a.b+x@gmail.com is the same inbox as ab@gmail.com.
+    const mailbox = mailboxKey(target.target)
+    const same = existing.find((c) => c.type === 'email' && c.verified && mailboxKey(c.target) === mailbox)
     if (same) return respond(same, 200)
     // At most one pending e-mail channel per place: a new request replaces the old one
     // (deleted below, once the request passed the e-mail limits).
     replacedEmail = existing.filter((c) => c.type === 'email' && !c.verified)
     existing = existing.filter((c) => !replacedEmail.includes(c))
+    if (existing.filter((c) => c.type === 'email').length >= MAX_EMAIL_CHANNELS_PER_PLACE) {
+      throw new HttpError(400, `เพิ่มอีเมลได้สูงสุด ${MAX_EMAIL_CHANNELS_PER_PLACE} อีเมลต่อจุดเฝ้าระวัง`)
+    }
   } else {
     // LINE / Telegram: hand out the pending code again rather than piling up channels,
     // unless it expired: then it is replaced by a new pending channel with a fresh code.
@@ -106,29 +113,36 @@ export const POST = handler('channels POST', async (req: Request, ctx: Ctx) => {
   }
 
   if (input.type === 'email') {
+    // The confirmation link must point at the public site; it is never built from the
+    // request (availableChannels already hides e-mail without PUBLIC_BASE_URL).
+    const origin = publicOrigin(config.PUBLIC_BASE_URL)
+    if (!origin) throw new HttpError(400, 'ช่องทางแจ้งเตือนนี้ยังไม่เปิดใช้งานบนเซิร์ฟเวอร์นี้')
     // Anyone can type any address here, so confirmation mail is limited per recipient
-    // (1 per 15 min, 3 per day; keyed by a hash so the limiter holds no addresses) and
-    // server-wide. In-memory: a restart or another serverless instance starts afresh.
-    const recipient = `email:${hashToken(channel.target)}`
+    // mailbox (1 per 15 min, 3 per day; keyed by a hash of mailboxKey() so +tags and Gmail
+    // dots share one bucket and the limiter holds no addresses), per place (whatever the
+    // addresses) and server-wide. In-memory: a restart or another serverless instance
+    // starts afresh.
+    const recipient = `email:to:${hashToken(mailboxKey(channel.target))}`
+    const fromPlace = `email:place:${place.id}`
     const limited = rateLimiter().takeAll([
       [recipient, LIMITS.emailConfirmRecipient],
       [`${recipient}:day`, LIMITS.emailConfirmRecipientDay],
+      [fromPlace, LIMITS.emailConfirmPlace],
       ['email:*', LIMITS.emailConfirmGlobal],
     ])
     if (!limited.ok) {
-      const perAddress = limited.blocked?.some((k) => k.startsWith(recipient)) ?? false
-      throw new HttpError(
-        429,
-        perAddress
-          ? 'ส่งอีเมลยืนยันไปยังที่อยู่นี้บ่อยเกินไป กรุณาตรวจสอบกล่องจดหมาย (รวมถึงจดหมายขยะ) หรือลองใหม่ภายหลัง'
-          : MSG.rateLimited,
-        { 'Retry-After': String(limited.retryAfterSec) },
-      )
+      const blocked = limited.blocked ?? []
+      const message = blocked.some((k) => k.startsWith(recipient))
+        ? 'ส่งอีเมลยืนยันไปยังที่อยู่นี้บ่อยเกินไป กรุณาตรวจสอบกล่องจดหมาย (รวมถึงจดหมายขยะ) หรือลองใหม่ภายหลัง'
+        : blocked.includes(fromPlace)
+          ? 'ขออีเมลยืนยันสำหรับจุดเฝ้าระวังนี้บ่อยเกินไป กรุณาลองใหม่ภายหลัง'
+          : MSG.rateLimited
+      throw new HttpError(429, message, { 'Retry-After': String(limited.retryAfterSec) })
     }
     for (const c of replacedEmail) await store.deleteChannel(c.id)
     channel.linkCode = emailConfirmCode()
     await store.addChannel(channel)
-    const url = `${publicOrigin(req, config.PUBLIC_BASE_URL)}/api/email/confirm?code=${encodeURIComponent(channel.linkCode)}`
+    const url = `${origin}/api/email/confirm?code=${encodeURIComponent(channel.linkCode)}`
     // The mail carries no user-supplied text (not even the place label).
     const sent = await sendEmail(lateFetch, config, confirmationEmail(channel.target, url))
     if (!sent.ok) {

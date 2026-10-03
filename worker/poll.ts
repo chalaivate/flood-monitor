@@ -10,9 +10,9 @@
 
 import { existsSync } from 'node:fs'
 import { loadConfig } from '../src/lib/config'
-import { getSenders } from '../src/lib/notify'
+import { getSenders, logChannelConfigWarnings } from '../src/lib/notify'
 import { log } from '../src/lib/server/log'
-import { runPollCycle, runRelayCycle, startLoop, summarize, type LoopHandle } from '../src/lib/server/poller'
+import { pollIntervalMs, runPollCycle, runRelayCycle, startLoop, summarize, type LoopHandle } from '../src/lib/server/poller'
 import { getSources } from '../src/lib/sources'
 import { getStore } from '../src/lib/store'
 
@@ -44,9 +44,11 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const config = loadConfig()
   const fetchImpl: typeof fetch = (input, init) => globalThis.fetch(input, init)
-  const intervalMs = Math.max(1, config.POLL_MINUTES) * 60_000
+  // POLL_MINUTES below 1 (0 would poll every second) is raised to 1, with a warning below 5.
+  const intervalMs = pollIntervalMs(config.POLL_MINUTES, log)
 
-  let cycle: () => Promise<boolean> // resolves true when the cycle was a total failure
+  /** Resolves true when the cycle was a total failure; `signal` aborts on shutdown. */
+  let cycle: (signal?: AbortSignal) => Promise<boolean>
 
   if (args.relay !== null) {
     let base: URL
@@ -66,7 +68,7 @@ async function main(): Promise<void> {
       console.error('relay mode: no Thai-IP-only source is enabled (check SOURCES / DATA_MODE)')
       process.exit(2)
     }
-    log(`[relay] relaying ${sources.map((s) => s.id).join(', ')} → ${base.origin}/api/ingest every ${config.POLL_MINUTES} min`)
+    log(`[relay] relaying ${sources.map((s) => s.id).join(', ')} → ${base.origin}/api/ingest every ${intervalMs / 60_000} min`)
     cycle = async () => {
       const s = await runRelayCycle({ baseUrl: base.toString(), token: config.INGEST_TOKEN!, config, sources, fetch: fetchImpl, log })
       return s.allFailed
@@ -77,10 +79,11 @@ async function main(): Promise<void> {
     const deps = { store, config, sources, senders: getSenders(), fetch: fetchImpl, log }
     log(
       `[worker] sources: ${sources.map((s) => s.id).join(', ') || '(none)'}; store=${config.STORE}; ` +
-        `alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}; data=${config.DATA_MODE}; every ${config.POLL_MINUTES} min`,
+        `alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}; data=${config.DATA_MODE}; every ${intervalMs / 60_000} min`,
     )
-    cycle = async () => {
-      const s = await runPollCycle(deps)
+    if (config.RUN_ALERTS === '1') logChannelConfigWarnings(config, log)
+    cycle = async (signal) => {
+      const s = await runPollCycle(deps, { signal })
       log(summarize(s))
       return s.allFailed
     }
@@ -93,8 +96,8 @@ async function main(): Promise<void> {
   }
 
   const loop: LoopHandle = startLoop(
-    async () => {
-      await cycle()
+    async (signal) => {
+      await cycle(signal)
     },
     { intervalMs, log },
   )

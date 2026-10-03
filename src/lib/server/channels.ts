@@ -62,6 +62,30 @@ export function isEmail(v: string): boolean {
   return v.length <= 254 && EMAIL_RE.test(v)
 }
 
+const GMAIL_DOMAINS = new Set(['gmail.com', 'googlemail.com'])
+
+/**
+ * The mailbox an address delivers to, for de-duplication and rate limits only (the
+ * channel keeps the address as typed): lower case, the domain without a trailing dot,
+ * any `+tag` removed, and for Gmail the dots in the local part removed and googlemail.com
+ * mapped to gmail.com. Without this, `a.b+1@gmail.com`, `ab+2@googlemail.com`, … would
+ * each get a fresh per-address bucket and flood one inbox with confirmation mails.
+ */
+export function mailboxKey(address: string): string {
+  const a = address.trim().toLowerCase()
+  const at = a.lastIndexOf('@')
+  if (at <= 0) return a
+  let local = a.slice(0, at)
+  let domain = a.slice(at + 1).replace(/\.+$/, '')
+  const plus = local.indexOf('+')
+  if (plus > 0) local = local.slice(0, plus)
+  if (GMAIL_DOMAINS.has(domain)) {
+    domain = 'gmail.com'
+    local = local.replaceAll('.', '')
+  }
+  return `${local}@${domain}`
+}
+
 export type TargetResult = { ok: true; target: string } | { ok: false; error: string }
 
 export interface ValidateTargetOptions {

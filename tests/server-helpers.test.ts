@@ -15,21 +15,23 @@ import {
   isLinkCodeExpired,
   LINK_CODE_ALPHABET,
   LINK_CODE_TTL_MS,
+  mailboxKey,
   parseLinkCode,
   randomLinkCode,
   validateChannelTarget,
 } from '@/lib/server/channels'
-import { HttpError, clientIp, readBodyCapped, readJson, zodMessage } from '@/lib/server/http'
+import { backgroundTasksSettled, runAfterResponse, runningBackgroundTasks } from '@/lib/server/background'
+import { HttpError, clientIp, publicOrigin, readBodyCapped, readJson, zodMessage } from '@/lib/server/http'
 import { linkByCode } from '@/lib/server/linking'
 import { bangkokStamp } from '@/lib/server/log'
 import { assertPublicUrl, isPrivateAddress, isPublicHostname, isRedirect, type LookupFn } from '@/lib/server/net'
 import { alertSettingsChanged, patchPlace } from '@/lib/server/places'
-import { runPollCycle, runRelayCycle, startLoop } from '@/lib/server/poller'
+import { pollIntervalMs, pruneOldReadings, runPollCycle, runRelayCycle, startLoop } from '@/lib/server/poller'
 import { maskTarget, toPublicChannel, toPublicPlace } from '@/lib/server/public'
 import { clearRadarCache, getRadarImage, isJpeg } from '@/lib/server/radar-proxy'
 import { enforceClientLimit, ipBucket, LIMITS, RateLimiter, rateLimiter } from '@/lib/server/rate-limit'
 import { ChannelInputSchema, IngestPayloadSchema, PlaceInputSchema } from '@/lib/server/validation'
-import { cachedWeather, clearWeatherCache, snapToWeatherGrid, weatherKey } from '@/lib/server/weather-cache'
+import { cachedWeather, clearWeatherCache, snapToWeatherGrid, WEATHER_STALE_MAX_MS, weatherBudget, weatherKey } from '@/lib/server/weather-cache'
 import type { SourceAdapter } from '@/lib/sources/types'
 import { SqliteStore } from '@/lib/store/sqlite'
 import type { Channel, Place, WeatherNow } from '@/lib/types'
@@ -299,6 +301,17 @@ describe('link codes and channel targets', () => {
     expect((await validateChannelTarget('discord', hook, { lookup: evilDiscord })).ok).toBe(false)
   })
 
+  it('normalises e-mail addresses to their mailbox for limits and de-duplication', () => {
+    expect(mailboxKey('Owner@Example.COM')).toBe('owner@example.com')
+    expect(mailboxKey(' owner+alerts@example.org ')).toBe('owner@example.org')
+    expect(mailboxKey('own.er@example.org')).toBe('own.er@example.org')
+    expect(mailboxKey('O.W.N.E.R+x+y@googlemail.com')).toBe('owner@gmail.com')
+    expect(mailboxKey('owner@gmail.com.')).toBe('owner@gmail.com')
+    // A leading + is the whole local part, not a tag.
+    expect(mailboxKey('+1@example.org')).toBe('+1@example.org')
+    expect(mailboxKey('not-an-address')).toBe('not-an-address')
+  })
+
   it('masks targets for public output', () => {
     const ch = (type: Channel['type'], target: string, extra: Partial<Channel> = {}): Channel => ({
       id: 'c',
@@ -329,6 +342,17 @@ describe('link codes and channel targets', () => {
 })
 
 describe('http helpers', () => {
+  it('builds absolute links only from PUBLIC_BASE_URL, never from the request', () => {
+    expect(publicOrigin(undefined)).toBeNull()
+    expect(publicOrigin('')).toBeNull()
+    expect(publicOrigin('https://flood.example.org/')).toBe('https://flood.example.org')
+    expect(publicOrigin('http://192.0.2.10:3000')).toBe('http://192.0.2.10:3000')
+    expect(publicOrigin('https://example.org/flood//')).toBe('https://example.org/flood')
+    for (const bad of ['flood.example.org', 'ftp://flood.example.org', 'javascript:alert(1)', 'https://u:p@flood.example.org', 'https://x.org/?a=1']) {
+      expect(publicOrigin(bad), bad).toBeNull()
+    }
+  })
+
   it('reads JSON with a size cap', async () => {
     const big = new Request('http://x/', { method: 'POST', body: 'x'.repeat(100) })
     await expect(readJson(big, 10)).rejects.toMatchObject({ status: 413 })
@@ -574,6 +598,82 @@ describe('weather cache', () => {
   })
 })
 
+describe('weather budget and stale fallback', () => {
+  afterEach(() => {
+    clearWeatherCache()
+    rateLimiter().reset()
+  })
+  const sample = (condition: string): WeatherNow => ({ observedAt: now, condition, weatherCode: 3, isDay: true, source: 'test' })
+
+  it('serves the last good value (stale) when the budget is spent, up to WEATHER_STALE_MAX_MS', async () => {
+    let t = 0
+    let allow = true
+    const load = vi.fn(async () => sample('เมฆมาก'))
+    const opts = () => ({ load, now: () => t, allowUpstream: () => allow })
+    expect(await cachedWeather(13.7, 100.5, opts())).toMatchObject({ condition: 'เมฆมาก' })
+    t += 11 * 60_000 // expired
+    allow = false
+    expect(await cachedWeather(13.7, 100.5, opts())).toMatchObject({ condition: 'เมฆมาก' })
+    expect(load).toHaveBeenCalledTimes(1)
+    // A refused request leaves the cache as it was: the next allowed call refreshes it.
+    allow = true
+    load.mockImplementationOnce(async () => sample('ฝนตก'))
+    expect(await cachedWeather(13.7, 100.5, opts())).toMatchObject({ condition: 'ฝนตก' })
+    t += WEATHER_STALE_MAX_MS + 1
+    allow = false
+    expect(await cachedWeather(13.7, 100.5, opts())).toBeNull()
+  })
+
+  it('serves the last good value when the provider fails, and retries sooner', async () => {
+    let t = 0
+    const load = vi.fn(async () => sample('แดดจัด'))
+    expect(await cachedWeather(13.8, 100.6, { load, now: () => t })).toMatchObject({ condition: 'แดดจัด' })
+    t += 11 * 60_000
+    load.mockImplementation(async () => {
+      throw new Error('down')
+    })
+    expect(await cachedWeather(13.8, 100.6, { load, now: () => t })).toMatchObject({ condition: 'แดดจัด' })
+    t += 60_000
+    expect(await cachedWeather(13.8, 100.6, { load, now: () => t })).toMatchObject({ condition: 'แดดจัด' })
+    expect(load).toHaveBeenCalledTimes(2)
+    t += 61_000
+    await cachedWeather(13.8, 100.6, { load, now: () => t })
+    expect(load).toHaveBeenCalledTimes(3)
+  })
+
+  it('counts saved places against the global budget; ad-hoc coordinates against their share too', () => {
+    const place = weatherBudget('place')
+    const adhoc = weatherBudget('adhoc')
+    for (let i = 0; i < LIMITS.weatherAdHoc.capacity; i++) expect(adhoc()).toBe(true)
+    // The ad-hoc share is spent; saved places still have the rest of the global budget.
+    expect(adhoc()).toBe(false)
+    const rest = LIMITS.weatherUpstream.capacity - LIMITS.weatherAdHoc.capacity
+    for (let i = 0; i < rest; i++) expect(place()).toBe(true)
+    expect(place()).toBe(false)
+  })
+
+  it('a spent global budget stops saved-place refreshes too, which then get the stale value', async () => {
+    const load = vi.fn(async () => sample('เมฆบางส่วน'))
+    let t = 0
+    const budget = weatherBudget('place')
+    expect(await cachedWeather(13.9, 100.4, { load, now: () => t, allowUpstream: budget })).not.toBeNull()
+    for (let i = 1; i < LIMITS.weatherUpstream.capacity; i++) budget()
+    t += 11 * 60_000
+    expect(await cachedWeather(13.9, 100.4, { load, now: () => t, allowUpstream: budget })).toMatchObject({ condition: 'เมฆบางส่วน' })
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the budgets as server-wide buckets the LRU never evicts', () => {
+    const rl = rateLimiter()
+    weatherBudget('adhoc')()
+    for (let i = 0; i < 10_050; i++) rl.take(`snapshot:198.51.${i >> 8}.${i & 255}`, LIMITS.snapshot)
+    // Evicting would refill the bucket to full capacity.
+    let n = 0
+    while (weatherBudget('adhoc')()) n++
+    expect(n).toBe(LIMITS.weatherAdHoc.capacity - 1)
+  })
+})
+
 describe('BMA radar proxy', () => {
   afterEach(() => clearRadarCache())
   const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4])
@@ -659,6 +759,37 @@ describe('poller', () => {
     expect(logs[0]).toContain('boom')
   })
 
+  it('passes an abort signal to the task that stop() aborts', async () => {
+    let seen: AbortSignal | null = null
+    let release!: () => void
+    const loop = startLoop(
+      async (signal) => {
+        seen = signal
+        await new Promise<void>((r) => (release = r))
+      },
+      { intervalMs: 600_000, log: () => {}, sleep: async () => {} },
+    )
+    await vi.waitFor(() => expect(seen).not.toBeNull())
+    expect(seen!.aborted).toBe(false)
+    const stopped = loop.stop()
+    expect(seen!.aborted).toBe(true)
+    release()
+    await stopped
+  })
+
+  it('clamps POLL_MINUTES to at least 1 and warns below 5', () => {
+    const logs: string[] = []
+    expect(pollIntervalMs(10, (m) => logs.push(m))).toBe(600_000)
+    expect(logs).toEqual([])
+    expect(pollIntervalMs(0, (m) => logs.push(m))).toBe(60_000)
+    expect(pollIntervalMs(-5)).toBe(60_000)
+    expect(pollIntervalMs(Number.NaN)).toBe(60_000)
+    expect(logs.join('\n')).toContain('POLL_MINUTES=0 is not allowed')
+    logs.length = 0
+    expect(pollIntervalMs(3, (m) => logs.push(m))).toBe(180_000)
+    expect(logs.join('\n')).toContain('below the recommended 5 min')
+  })
+
   const fakeSource = (id: SourceAdapter['id'], fail = false): SourceAdapter => ({
     id,
     label: id,
@@ -685,6 +816,44 @@ describe('poller', () => {
     const s2 = await runPollCycle({ ...base, config: loadConfig({}), sources: [fakeSource('bma-rain', true)] })
     expect(s2.alerts).not.toBeNull()
     expect(s2.allFailed).toBe(true)
+    store.close()
+  })
+
+  it('runPollCycle does not start alerts or pruning once shutdown began', async () => {
+    const store = new SqliteStore(':memory:')
+    const ctrl = new AbortController()
+    const logs: string[] = []
+    const prune = vi.spyOn(store, 'pruneReadings')
+    const source = fakeSource('bma-canal')
+    const slow: SourceAdapter = {
+      ...source,
+      async fetch(ctx) {
+        ctrl.abort() // the signal arrives while the ingest is running
+        return source.fetch(ctx)
+      },
+    }
+    const s = await runPollCycle(
+      { store, senders: [], fetch: globalThis.fetch, now: () => new Date(now), config: loadConfig({}), sources: [slow], log: (m) => logs.push(m) },
+      { signal: ctrl.signal },
+    )
+    expect(s.ingest.results[0]!.inserted).toBe(1)
+    expect(s.alerts).toBeNull()
+    expect(s.pruned).toBe(0)
+    expect(prune).not.toHaveBeenCalled()
+    expect(logs.join('\n')).toContain('shutting down')
+    expect(await store.getMeta('lastAlertsAt')).toBeNull()
+    store.close()
+  })
+
+  it('pruneOldReadings removes readings older than HISTORY_HOURS', async () => {
+    const store = new SqliteStore(':memory:')
+    const t = Date.parse(now)
+    await store.upsertStations([{ id: 'canal:P', source: 'bma-canal', kind: 'canal', name: 'P', lat: 13.7, lng: 100.5, agency: 'x' }])
+    await store.insertReadings([
+      { stationId: 'canal:P', observedAt: new Date(t - 73 * 3_600_000).toISOString(), waterLevel: 1 },
+      { stationId: 'canal:P', observedAt: new Date(t - 71 * 3_600_000).toISOString(), waterLevel: 1 },
+    ])
+    expect(await pruneOldReadings({ store, config: loadConfig({ HISTORY_HOURS: '72' }), now: () => new Date(t) })).toBe(1)
     store.close()
   })
 
@@ -769,5 +938,28 @@ describe('poller', () => {
     expect(n).toBe(1)
     expect(res).toMatchObject({ ok: false, allFailed: true })
     expect(res.error).toContain('401')
+  })
+})
+
+describe('background tasks', () => {
+  it('tracks running after-response tasks so a shutdown can wait for them', async () => {
+    let release!: () => void
+    const logs: string[] = []
+    runAfterResponse('t', () => new Promise<void>((r) => (release = r)), (m) => logs.push(m))
+    await vi.waitFor(() => expect(runningBackgroundTasks()).toBe(1))
+    let settled = false
+    const wait = backgroundTasksSettled().then(() => (settled = true))
+    await new Promise((r) => setTimeout(r, 5))
+    expect(settled).toBe(false)
+    release()
+    await wait
+    expect(runningBackgroundTasks()).toBe(0)
+    // A failing task is logged, still untracked afterwards, and never rejects the wait.
+    runAfterResponse('t', async () => {
+      throw new Error('boom')
+    }, (m) => logs.push(m))
+    await backgroundTasksSettled()
+    await vi.waitFor(() => expect(logs.join('\n')).toContain('boom'))
+    expect(runningBackgroundTasks()).toBe(0)
   })
 })

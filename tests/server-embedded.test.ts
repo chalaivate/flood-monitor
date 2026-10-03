@@ -144,3 +144,180 @@ describe('embedded worker restart', () => {
     log.mockRestore()
   })
 })
+
+describe('graceful shutdown (lifecycle)', () => {
+  type G = typeof globalThis & {
+    __floodEmbeddedWorker?: Promise<{ stop(): Promise<void> } | null>
+    __floodEmbeddedWorkerStopped?: boolean
+    __floodEmbeddedWorkerRetry?: unknown
+    __floodEmbeddedWorkerFailures?: number
+    __floodChannelWarningsLogged?: boolean
+  }
+  const g = globalThis as G
+
+  function fakeProcess(existingListeners = 0) {
+    const handlers = new Map<string, (() => void)[]>()
+    return {
+      on(signal: string, fn: () => void) {
+        handlers.set(signal, [...(handlers.get(signal) ?? []), fn])
+      },
+      listenerCount: () => existingListeners,
+      emit(signal: string) {
+        for (const fn of handlers.get(signal) ?? []) fn()
+      },
+      count: (signal: string) => handlers.get(signal)?.length ?? 0,
+    }
+  }
+
+  it('on SIGTERM stops the poller, waits for the cycle and background tasks, then exits 143', async () => {
+    const { installShutdownHandlers, __resetShutdownForTests } = await import('@/lib/server/lifecycle')
+    __resetShutdownForTests()
+    const proc = fakeProcess()
+    const exits: number[] = []
+    const logs: string[] = []
+    const order: string[] = []
+    let finishCycle!: () => void
+    const stopWorker = vi.fn(
+      () =>
+        new Promise<void>((r) => {
+          finishCycle = () => {
+            order.push('worker stopped')
+            r()
+          }
+        }),
+    )
+    const waitBackground = vi.fn(async () => {
+      order.push('background settled')
+    })
+    expect(installShutdownHandlers({ proc, exit: (c) => exits.push(c), log: (m) => logs.push(m), stopWorker, waitBackground, graceMs: 5_000 })).toBe(true)
+    // Installed once per process.
+    expect(installShutdownHandlers({ proc })).toBe(false)
+    expect(proc.count('SIGTERM')).toBe(1)
+
+    proc.emit('SIGTERM')
+    expect(stopWorker).toHaveBeenCalledTimes(1)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(exits).toEqual([]) // still waiting for the cycle in flight
+    finishCycle()
+    await vi.waitFor(() => expect(exits).toEqual([143]))
+    expect(order).toEqual(['worker stopped', 'background settled'])
+    expect(logs.join('\n')).toContain('SIGTERM received')
+    expect(logs.at(-1)).toBe('[shutdown] done')
+    __resetShutdownForTests()
+  })
+
+  it('exits after the grace period, and at once on a second signal', async () => {
+    const { installShutdownHandlers, __resetShutdownForTests } = await import('@/lib/server/lifecycle')
+    __resetShutdownForTests()
+    const proc = fakeProcess()
+    const exits: number[] = []
+    const logs: string[] = []
+    const never = () => new Promise<void>(() => {})
+    installShutdownHandlers({ proc, exit: (c) => exits.push(c), log: (m) => logs.push(m), stopWorker: never, waitBackground: never, graceMs: 20 })
+    proc.emit('SIGINT')
+    await vi.waitFor(() => expect(exits).toEqual([130]))
+    expect(logs.join('\n')).toContain('grace period over')
+
+    __resetShutdownForTests()
+    const proc2 = fakeProcess()
+    const exits2: number[] = []
+    installShutdownHandlers({ proc: proc2, exit: (c) => exits2.push(c), log: () => {}, stopWorker: never, waitBackground: never, graceMs: 60_000 })
+    proc2.emit('SIGTERM')
+    proc2.emit('SIGTERM')
+    expect(exits2).toEqual([143])
+    __resetShutdownForTests()
+  })
+
+  it('warns when another SIGTERM handler (Next.js) is already registered', async () => {
+    const { installShutdownHandlers, __resetShutdownForTests } = await import('@/lib/server/lifecycle')
+    __resetShutdownForTests()
+    const logs: string[] = []
+    installShutdownHandlers({ proc: fakeProcess(1), exit: () => {}, log: (m) => logs.push(m) })
+    expect(logs.join('\n')).toContain('not in .env')
+    __resetShutdownForTests()
+  })
+
+  it('drain waits for running after-response tasks (ingest alerts)', async () => {
+    const { drain } = await import('@/lib/server/lifecycle')
+    const { runAfterResponse } = await import('@/lib/server/background')
+    let release!: () => void
+    runAfterResponse('ingest', () => new Promise<void>((r) => (release = r)))
+    let finished: boolean | null = null
+    const p = drain({ stopWorker: async () => {}, graceMs: 5_000 }).then((ok) => (finished = ok))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(finished).toBeNull()
+    release()
+    await p
+    expect(finished).toBe(true)
+  })
+
+  it('onServerStart logs half-configured channels and installs handlers only with NEXT_MANUAL_SIG_HANDLE', async () => {
+    const { onServerStart, __resetShutdownForTests } = await import('@/lib/server/lifecycle')
+    __resetShutdownForTests()
+    g.__floodChannelWarningsLogged = false
+    process.env.TELEGRAM_BOT_TOKEN = '123:ABC'
+    process.env.TELEGRAM_WEBHOOK_SECRET = ''
+    process.env.TELEGRAM_BOT_USERNAME = ''
+    resetConfigCache()
+    const logs: string[] = []
+    const proc = fakeProcess()
+    onServerStart({ EMBEDDED_WORKER: '0', NEXT_MANUAL_SIG_HANDLE: 'true' }, { proc, log: (m) => logs.push(m), exit: () => {} })
+    expect(logs.join('\n')).toContain('Telegram is not offered to users: TELEGRAM_WEBHOOK_SECRET, TELEGRAM_BOT_USERNAME are not set')
+    expect(proc.count('SIGTERM')).toBe(1)
+    expect(proc.count('SIGINT')).toBe(1)
+
+    // Without NEXT_MANUAL_SIG_HANDLE Next.js owns the signals: no handlers, and a hint when the worker is embedded.
+    __resetShutdownForTests()
+    const proc2 = fakeProcess()
+    const logs2: string[] = []
+    const startSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    onServerStart({ EMBEDDED_WORKER: '1' }, { proc: proc2, log: (m) => logs2.push(m) })
+    startSpy.mockRestore()
+    expect(proc2.count('SIGTERM')).toBe(0)
+    expect(logs2.join('\n')).toContain('NEXT_MANUAL_SIG_HANDLE is not set')
+    // Channel warnings are logged once per process.
+    expect(logs2.join('\n')).not.toContain('Telegram')
+    delete process.env.TELEGRAM_BOT_TOKEN
+    resetConfigCache()
+    __resetShutdownForTests()
+  })
+
+  it('stopEmbeddedWorker stops the loop, cancels a pending retry and prevents restarts', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { startEmbeddedWorker, stopEmbeddedWorker } = await import('@/lib/server/embedded-worker')
+    const running = await g.__floodEmbeddedWorker
+    expect(running).not.toBeNull()
+    await stopEmbeddedWorker()
+    expect(g.__floodEmbeddedWorker).toBeUndefined()
+    const before = fetched.count
+    expect(await startEmbeddedWorker()).toBeNull()
+
+    // A retry scheduled before the shutdown is cancelled and does not start anything.
+    g.__floodEmbeddedWorkerStopped = false
+    __setStoreForTests(null)
+    process.env.STORE = 'supabase'
+    process.env.SUPABASE_URL = ''
+    resetConfigCache()
+    const timers: { fn: () => void; cleared: boolean }[] = []
+    const opts = {
+      setTimer: (fn: () => void) => timers.push({ fn, cleared: false }) - 1,
+      clearTimer: (h: unknown) => {
+        timers[h as number]!.cleared = true
+      },
+    }
+    expect(await startEmbeddedWorker(opts)).toBeNull()
+    expect(timers).toHaveLength(1)
+    await stopEmbeddedWorker()
+    expect(timers[0]!.cleared).toBe(true)
+    process.env.STORE = 'sqlite'
+    resetConfigCache()
+    __setStoreForTests(new SqliteStore(':memory:'))
+    timers[0]!.fn() // a timer that fired anyway
+    expect(g.__floodEmbeddedWorker).toBeUndefined()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(fetched.count).toBe(before)
+    g.__floodEmbeddedWorkerStopped = false
+    g.__floodEmbeddedWorkerFailures = 0
+    log.mockRestore()
+  })
+})

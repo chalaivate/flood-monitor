@@ -7,7 +7,7 @@ import { formatShortBkk } from '../time'
 import type { DashboardSnapshot, Place } from '../types'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN, LEVEL_LABEL_TH } from '../types'
 import { PLACE_DEFAULTS } from './validation'
-import { cachedWeather } from './weather-cache'
+import { cachedWeather, weatherBudget } from './weather-cache'
 
 // Snapshot assembly shared by /api/snapshot and the chat bots' "สถานะ" replies.
 
@@ -35,7 +35,10 @@ export interface LoadSnapshotOptions {
   fetch?: typeof fetch
   /** Skip the weather call (chat replies). */
   weather?: boolean
-  /** Budget check before an upstream weather request (see cachedWeather allowUpstream). */
+  /**
+   * Budget check before an upstream weather request (see cachedWeather allowUpstream).
+   * Default: the server-wide budget for saved places, weatherBudget('place').
+   */
   weatherBudget?: () => boolean
 }
 
@@ -51,7 +54,7 @@ export async function loadSnapshot(
   const since = new Date(now.getTime() - SNAPSHOT_HISTORY_MIN * 60_000).toISOString()
   const [history, weather, sources, lastIngestAt] = await Promise.all([
     store.history(ids, since),
-    opts.weather === false ? Promise.resolve(null) : cachedWeather(place.lat, place.lng, { fetch: opts.fetch, allowUpstream: opts.weatherBudget }),
+    opts.weather === false ? Promise.resolve(null) : cachedWeather(place.lat, place.lng, { fetch: opts.fetch, allowUpstream: opts.weatherBudget ?? weatherBudget('place') }),
     store.listSourceHealth(),
     store.getMeta(META_LAST_INGEST),
   ])

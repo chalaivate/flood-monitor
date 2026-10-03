@@ -59,7 +59,9 @@ docker compose logs -f app      # ควรเห็น [ingest] bma-canal: ~312
   และตั้ง `TRUST_PROXY=cloudflare` เพื่อให้จำกัดคำขอต่อ IP ของผู้ใช้จริงได้ (ดู [TRUST_PROXY](#trust_proxy-ip-ของผู้ใช้สำหรับการจำกัดคำขอ))
   เมื่อใช้ tunnel ให้ผูกพอร์ตไว้ที่ `127.0.0.1:3000:3000` (หรือลบ `ports:` ออก เพราะ cloudflared เข้าถึง `http://app:3000` ผ่านเครือข่ายของ compose อยู่แล้ว)
   ไม่เช่นนั้นคนนอกจะยิงตรงเข้าพอร์ต 3000 พร้อม header ปลอมได้
-- หยุด/อัปเดต: `docker compose down` / `git pull && docker compose up -d --build` — เซิร์ฟเวอร์รอรอบดึงข้อมูลที่ค้างอยู่ให้จบก่อนปิด ข้อมูลอยู่ใน `./data` ไม่หายเมื่อ build ใหม่
+- หยุด/อัปเดต: `docker compose down` / `git pull && docker compose up -d --build` — ข้อมูลอยู่ใน `./data` ไม่หายเมื่อ build ใหม่
+  เมื่อสั่งหยุด เซิร์ฟเวอร์รอรอบดึงข้อมูลและงานเบื้องหลังที่ค้างอยู่ได้สูงสุด 25 วินาที (compose ตั้ง `stop_grace_period: 30s`;
+  ถ้าใช้ `docker` ตรง ๆ ให้สั่ง `docker stop -t 30`) — รอบที่ถูกขัดจะข้ามการประเมินแจ้งเตือน แล้วไปประเมินในรอบแรกหลังเปิดใหม่
 - สำรองข้อมูล: `sqlite3 data/flood.db ".backup backup.db"`
 - ตรวจสุขภาพ: `curl http://localhost:3000/api/health`
 
@@ -70,6 +72,10 @@ npm ci && npm run build           # build จะคัดลอก public แล
 # ใน .env: EMBEDDED_WORKER=1 และ DATA_DIR=/ที่อยู่เต็ม/ของ/flood-monitor/data (ควรเป็น path เต็ม)
 npm run start:standalone          # = node --env-file-if-exists=.env .next/standalone/server.js (รันจากโฟลเดอร์โปรเจกต์)
 ```
+
+การปิดเครื่องอย่างนุ่มนวลกับ `EMBEDDED_WORKER=1` ต้องมี `NEXT_MANUAL_SIG_HANDLE=true` ใน environment จริง
+(systemd `Environment=` หรือ `export`) — `npm run start:standalone` อ่านจาก `.env` ได้เพราะใช้ `--env-file`
+แต่ `next start` ตัดสินใจก่อนโหลด `.env` ถ้าตั้งไม่ถูกเซิร์ฟเวอร์จะเขียนคำเตือนใน log
 
 หรือแยกเป็นสองโปรเซส: `npm start` (เว็บ) + `npm run worker` (ตัวดึงข้อมูล) ใช้ DATA_DIR เดียวกันได้ (SQLite WAL)
 — `npm start` จะพิมพ์คำเตือน `"next start" does not work with "output: standalone"` ซึ่งไม่มีผลกับการทำงาน
@@ -154,15 +160,17 @@ EMBEDDED_WORKER=1        # หรือ cron เรียก /api/cron/poll — 
 | Discord | ไม่ต้องตั้งค่า |
 
 ช่องทางที่ไม่ได้ตั้งค่า (หรือตั้งไม่ครบชุด) จะถูกซ่อนในหน้า "แจ้งเตือน" โดยอัตโนมัติ (อ่านจาก `/api/config/public`)
+และ log ตอนเริ่มเซิร์ฟเวอร์จะบอกว่าขาดตัวแปรใด — LINE ต้องครบ 3 ค่า (`LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET`, `LINE_ADD_FRIEND_URL`),
+Telegram ครบ 3 ค่า (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET`)
 อีเมลต้องตั้ง `PUBLIC_BASE_URL` ด้วย เพราะลิงก์ยืนยันในอีเมลต้องชี้ไปที่โดเมนจริง
 
 ### สร้างกุญแจ Web Push บนเครื่องที่มีแต่ Docker
 
 ```bash
-docker compose run --rm app node -e "const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\nVAPID_PRIVATE_KEY='+k.privateKey)"
+docker compose run --rm --no-deps app node -e "const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\nVAPID_PRIVATE_KEY='+k.privateKey)"
 ```
 
-แล้วใส่ `VAPID_SUBJECT=mailto:<อีเมลผู้ดูแล>` เพิ่มเอง
+จะใส่ `VAPID_SUBJECT=mailto:<อีเมลผู้ดูแล>` เพิ่มก็ได้ (ถ้าไม่ใส่ ระบบใช้ `PUBLIC_BASE_URL`)
 
 ### LINE
 

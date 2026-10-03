@@ -159,10 +159,27 @@ export function clientIp(req: Request, trust: TrustProxy = getConfig().TRUST_PRO
   return ip ?? 'unknown'
 }
 
-/** Origin for links we generate (confirmation e-mails, redirects). */
-export function publicOrigin(req: Request, publicBaseUrl: string | undefined): string {
-  if (publicBaseUrl) return publicBaseUrl.replace(/\/+$/, '')
-  return new URL(req.url).origin
+/**
+ * Absolute base URL for links that leave the site (confirmation e-mails): PUBLIC_BASE_URL
+ * without its trailing slash, or null when it is unset or not an http(s) URL.
+ *
+ * Never derived from the request. In Next.js 16 `req.url` carries the server's bind
+ * address (0.0.0.0 / localhost:3000 in Docker), not the public host, and the Host /
+ * X-Forwarded-Host headers are client-controlled: building an e-mailed link from them
+ * would let anyone send our confirmation mail pointing at their own site. Redirects and
+ * links on our own pages use relative paths instead, which work without this setting.
+ */
+export function publicOrigin(publicBaseUrl: string | undefined): string | null {
+  const raw = publicBaseUrl?.trim()
+  if (!raw) return null
+  try {
+    const u = new URL(raw)
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+    if (u.username || u.password || u.search || u.hash) return null
+  } catch {
+    return null
+  }
+  return raw.replace(/\/+$/, '')
 }
 
 /** Route params are a Promise in Next.js 16. */

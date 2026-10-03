@@ -20,6 +20,10 @@ RUN mkdir -p public && npm run build
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app
+# NEXT_MANUAL_SIG_HANDLE: Next.js leaves SIGTERM/SIGINT to the app, which stops the
+# embedded poller and waits (up to 25 s) for the cycle in flight before exiting
+# (src/lib/server/lifecycle.ts). Give the container a longer stop timeout than that
+# (docker-compose.yml: stop_grace_period; plain docker: `docker stop -t 30`).
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
@@ -27,6 +31,7 @@ ENV NODE_ENV=production \
     STORE=sqlite \
     DATA_DIR=/app/data \
     EMBEDDED_WORKER=1 \
+    NEXT_MANUAL_SIG_HANDLE=true \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning
 
 # The official image ships an unprivileged "node" user (uid/gid 1000).

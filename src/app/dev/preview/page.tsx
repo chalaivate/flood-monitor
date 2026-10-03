@@ -3,7 +3,7 @@ import { notFound } from 'next/navigation'
 import type { DashboardSnapshot } from '@/lib/types'
 import { isPreviewVariant, rebaseSnapshot } from '@/lib/ui/preview'
 import { PreviewDashboard } from '@/components/dashboard/PreviewDashboard'
-import sample from '../../../../tests/fixtures/snapshot-sample.json'
+import sample from './snapshot-sample.json'
 
 export const metadata: Metadata = { title: 'พรีวิวแดชบอร์ด', robots: { index: false } }
 

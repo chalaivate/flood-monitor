@@ -41,17 +41,24 @@ export const LIMITS = {
   /** Link-code attempts per LINE/Telegram chat, and per platform for all chats together. */
   linkAttemptChat: { capacity: 5, windowMs: 10 * MIN },
   linkAttemptPlatform: { capacity: 300, windowMs: 10 * MIN },
-  /** Confirmation e-mails per recipient address (keyed by its sha256). */
+  /** Confirmation e-mails per recipient mailbox (keyed by the sha256 of mailboxKey()). */
   emailConfirmRecipient: { capacity: 1, windowMs: 15 * MIN },
   emailConfirmRecipientDay: { capacity: 3, windowMs: DAY },
+  /** Confirmation e-mails requested from one place, whatever the addresses. */
+  emailConfirmPlace: { capacity: 5, windowMs: DAY },
   /** Server-wide cap on confirmation e-mails (protects the Resend quota and sender reputation). */
   emailConfirmGlobal: { capacity: 100, windowMs: HOUR },
   /** GET /api/snapshot per client IP. */
   snapshot: { capacity: 120, windowMs: MIN },
   /**
-   * Server-wide upstream weather requests (cache misses) for ad-hoc snapshot coordinates.
-   * Open-Meteo's free tier allows 10,000 calls/day per server IP; saved places stay outside
-   * this budget so map browsing can never starve them.
+   * Server-wide upstream weather requests (cache misses), saved places and ad-hoc
+   * coordinates together. Open-Meteo's free tier allows 10,000 calls/day per server IP;
+   * 400/hour stays under it. When it is spent, the last cached value is served (stale).
+   */
+  weatherUpstream: { capacity: 400, windowMs: HOUR },
+  /**
+   * The share of weatherUpstream that ad-hoc snapshot coordinates (map browsing) may use,
+   * so they can never starve saved places.
    */
   weatherAdHoc: { capacity: 200, windowMs: HOUR },
 } satisfies Record<string, LimitRule>

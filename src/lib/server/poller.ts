@@ -17,13 +17,32 @@ export interface CycleSummary {
   durationMs: number
 }
 
+/** Delete readings older than HISTORY_HOURS; returns how many were removed. */
+export function pruneOldReadings(deps: Pick<CycleDeps, 'store' | 'config' | 'now'>): Promise<number> {
+  const now = deps.now?.() ?? new Date()
+  return deps.store.pruneReadings(new Date(now.getTime() - deps.config.HISTORY_HOURS * 3_600_000).toISOString())
+}
+
+export interface PollCycleOptions {
+  /**
+   * Aborted when the process is shutting down. Checked after the ingest: alert evaluation
+   * is not *started* then, so a shutdown never cuts it off half-way (messages sent but
+   * their state not saved ⇒ repeated after the restart, alerts lock left held). The next
+   * cycle after the restart evaluates the same readings.
+   */
+  signal?: AbortSignal
+}
+
 /** ingest → alerts (if enabled) → prune readings older than HISTORY_HOURS. */
-export async function runPollCycle(deps: CycleDeps): Promise<CycleSummary> {
+export async function runPollCycle(deps: CycleDeps, opts: PollCycleOptions = {}): Promise<CycleSummary> {
   const started = Date.now()
   const ingest = await runIngest(deps)
+  if (opts.signal?.aborted) {
+    deps.log?.('[poll] shutting down: alerts and pruning skipped for this cycle')
+    return { ingest, alerts: null, pruned: 0, allFailed: ingest.results.every((r) => !r.ok), durationMs: Date.now() - started }
+  }
   const alerts = deps.config.RUN_ALERTS === '1' ? await runAlerts(deps) : null
-  const now = deps.now?.() ?? new Date()
-  const pruned = await deps.store.pruneReadings(new Date(now.getTime() - deps.config.HISTORY_HOURS * 3_600_000).toISOString())
+  const pruned = await pruneOldReadings(deps)
   return {
     ingest,
     alerts,
@@ -31,6 +50,25 @@ export async function runPollCycle(deps: CycleDeps): Promise<CycleSummary> {
     allFailed: ingest.results.every((r) => !r.ok),
     durationMs: Date.now() - started,
   }
+}
+
+/** Lowest poll interval accepted; anything below is raised to it. */
+export const MIN_POLL_MINUTES = 1
+/** Below this, BMA's WAF (weather.bangkok.go.th) may start refusing the server's IP. */
+export const RECOMMENDED_MIN_POLL_MINUTES = 5
+
+/**
+ * Poll interval in ms from POLL_MINUTES, never below MIN_POLL_MINUTES (0, a negative or a
+ * non-numeric value would otherwise poll every second). Logs a warning below the
+ * recommended minimum. Shared by worker/poll.ts and the embedded worker.
+ */
+export function pollIntervalMs(pollMinutes: number, log?: Logger): number {
+  const minutes = Number.isFinite(pollMinutes) ? Math.max(MIN_POLL_MINUTES, pollMinutes) : MIN_POLL_MINUTES
+  if (log && minutes !== pollMinutes) log(`[poll] POLL_MINUTES=${pollMinutes} is not allowed; polling every ${minutes} min`)
+  if (log && minutes < RECOMMENDED_MIN_POLL_MINUTES) {
+    log(`[poll] WARNING: POLL_MINUTES=${minutes} is below the recommended ${RECOMMENDED_MIN_POLL_MINUTES} min; upstream servers may block frequent requests`)
+  }
+  return minutes * 60_000
 }
 
 export function summarize(s: CycleSummary): string {
@@ -70,16 +108,17 @@ const abortableSleep = (ms: number, signal: AbortSignal) =>
 
 /**
  * Run `task` now, then again `intervalMs` after each run *started* (never
- * overlapping; a slow run just delays the next one).
+ * overlapping; a slow run just delays the next one). `task` gets a signal that is
+ * aborted by stop(), so a long run can skip work it should not start any more.
  */
-export function startLoop(task: () => Promise<void>, opts: LoopOptions): LoopHandle {
+export function startLoop(task: (signal: AbortSignal) => Promise<void>, opts: LoopOptions): LoopHandle {
   const ctrl = new AbortController()
   const sleep = opts.sleep ?? abortableSleep
   const done = (async () => {
     while (!ctrl.signal.aborted) {
       const started = Date.now()
       try {
-        await task()
+        await task(ctrl.signal)
       } catch (err) {
         opts.log(`[poll] cycle crashed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
       }
