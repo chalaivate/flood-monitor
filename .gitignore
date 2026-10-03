@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+build/
+coverage/
+playwright-report/
+test-results/
+next-env.d.ts
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+# runtime state of the local file store
+data/
+.DS_Store
