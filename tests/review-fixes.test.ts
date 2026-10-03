@@ -300,3 +300,18 @@ describe('store selection', () => {
     await expect(createStore(loadConfig({ DATA_MODE: 'fixture', STORE: 'supabase', SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'k' }))).rejects.toThrow(/fixture/)
   })
 })
+
+describe('frozen source detection', () => {
+  it('flags sources that answer but deliver old observations', async () => {
+    const { frozenSources } = await import('@/lib/ui/format')
+    const now = Date.parse('2026-10-03T10:00:00Z')
+    const res = frozenSources(
+      [
+        { source: 'thaiwater-canal', ok: true, lastAttemptAt: '2026-10-03T09:55:00Z', latestObservationAt: '2026-09-28T06:30:00Z' },
+        { source: 'bma-canal', ok: true, lastAttemptAt: '2026-10-03T09:55:00Z', latestObservationAt: '2026-10-03T09:50:00Z' },
+      ],
+      now,
+    )
+    expect(res.map((r) => r.source.source)).toEqual(['thaiwater-canal'])
+  })
+})

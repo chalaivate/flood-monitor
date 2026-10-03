@@ -1,4 +1,4 @@
-import type { Station, StationStatus } from '../types'
+import type { SourceHealth, Station, StationStatus } from '../types'
 import { trendTh } from '../engine/format'
 import { formatAgeTh, minutesBetween } from '../time'
 
@@ -33,6 +33,23 @@ export function isIngestStale(lastIngestAt: string | null | undefined, pollMinut
   if (!lastIngestAt) return true
   const mins = minutesBetween(lastIngestAt, new Date(nowMs))
   return !Number.isFinite(mins) || mins > 3 * Math.max(1, pollMinutes)
+}
+
+/** Sources whose newest observation is older than this answer "200 OK" but deliver frozen data. */
+export const SOURCE_FROZEN_MIN = 180
+
+/**
+ * Sources that answered but whose newest observation is older than SOURCE_FROZEN_MIN
+ * (e.g. a mirror stuck on an old snapshot). Failed sources are covered by the ingest banner.
+ */
+export function frozenSources(sources: SourceHealth[], nowMs: number): { source: SourceHealth; minutes: number }[] {
+  const out: { source: SourceHealth; minutes: number }[] = []
+  for (const h of sources) {
+    if (!h.latestObservationAt) continue
+    const minutes = minutesBetween(h.latestObservationAt, new Date(nowMs))
+    if (Number.isFinite(minutes) && minutes > SOURCE_FROZEN_MIN) out.push({ source: h, minutes })
+  }
+  return out
 }
 
 /** Newest observedAt across the snapshot's water stations (ISO) or null. */

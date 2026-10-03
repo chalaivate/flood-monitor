@@ -6,7 +6,8 @@ import { LEVEL_ORDER } from '@/lib/types'
 import type { DataMode } from '@/lib/ui/api'
 import { bkkTime } from '@/lib/ui/chart'
 import { openLocationDialog } from '@/lib/ui/dialog'
-import { durationTh, isIngestStale } from '@/lib/ui/format'
+import { durationTh, frozenSources, isIngestStale } from '@/lib/ui/format'
+import { sourceLabel } from '@/lib/ui/levels'
 import { notifyPlaceChanged, readStoredPlace, shareUrl, stripPlaceParams, type ResolvedPlace } from '@/lib/ui/place'
 import { minutesBetween } from '@/lib/time'
 import { Banner } from '../Banner'
@@ -156,6 +157,17 @@ function Banners({
     out.push(
       <Banner key="stale" tone="watch" title={mins === null ? 'ยังไม่มีการดึงข้อมูลจากแหล่งข้อมูล' : `ข้อมูลไม่ได้อัปเดตมา ${durationTh(mins)}`} role="status">
         ระบบดึงข้อมูลอาจขัดข้อง ค่าที่แสดงอาจไม่ใช่สถานการณ์ปัจจุบัน ระบบจะลองใหม่อัตโนมัติ
+      </Banner>,
+    )
+  }
+  const frozen = snapshot && !isIngestStale(snapshot.lastIngestAt, snapshot.pollMinutes, nowMs) ? frozenSources(snapshot.sources, nowMs) : []
+  if (frozen.length > 0) {
+    out.push(
+      <Banner key="frozen" tone="watch" title="บางแหล่งข้อมูลไม่มีค่าใหม่" role="status">
+        {frozen
+          .map(({ source, minutes }) => `${sourceLabel(source.source)} (${source.source}) ค่าล่าสุดเมื่อ ${durationTh(minutes)}ที่แล้ว`)
+          .join(' · ')}
+        {' — จุดวัดจากแหล่งนี้จะแสดงเป็น “ไม่มีข้อมูลล่าสุด”'}
       </Banner>,
     )
   }
