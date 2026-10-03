@@ -254,6 +254,10 @@ export interface RadarImage {
   id: string
   /** Thai title, e.g. "เรดาร์ฝน กทม. (หนองจอก)". */
   title: string
+  /** Short tab label, e.g. "หนองจอก". */
+  tabLabel?: string
+  /** true for forecasts (nowcast): never present as "ตอนนี้". */
+  forecast?: boolean
   url: string
   /** Where the image comes from, for attribution. */
   source: string
@@ -288,6 +292,11 @@ export interface DashboardSnapshot {
   weather: WeatherNow | null
   radar: RadarImage[]
   sources: SourceHealth[]
+  /**
+   * Distance (km) from the place to the nearest station with recent data, per kind, regardless of
+   * the place radius — lets the UI tell "outside coverage" apart from "radius too small".
+   */
+  coverage?: { nearestWaterKm: number | null; nearestRainKm: number | null }
   /** Last time the ingest worker completed a cycle. */
   lastIngestAt: string | null
   /** Polling cadence the worker is configured with, minutes. */

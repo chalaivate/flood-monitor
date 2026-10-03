@@ -21,6 +21,7 @@ export function radarImages(): RadarImage[] {
     {
       id: 'bma-nongchok',
       title: 'เรดาร์ฝน กทม. (หนองจอก)',
+      tabLabel: 'หนองจอก',
       url: '/api/radar/bma/nongchok',
       source: 'สำนักการระบายน้ำ กทม.',
       refreshMinutes: 5,
@@ -28,6 +29,7 @@ export function radarImages(): RadarImage[] {
     {
       id: 'bma-nongkhaem',
       title: 'เรดาร์ฝน กทม. (หนองแขม)',
+      tabLabel: 'หนองแขม',
       url: '/api/radar/bma/nongkhaem',
       source: 'สำนักการระบายน้ำ กทม.',
       refreshMinutes: 5,
@@ -35,6 +37,8 @@ export function radarImages(): RadarImage[] {
     {
       id: 'bma-nowcast',
       title: 'คาดการณ์ฝน 3 ชม. ข้างหน้า (กทม.)',
+      tabLabel: 'คาดการณ์ 3 ชม.',
+      forecast: true,
       url: 'https://dds.bangkok.go.th/Line_data/picture/radar_rain.gif',
       source: 'สำนักการระบายน้ำ กทม. / Weathernews',
       refreshMinutes: 10,

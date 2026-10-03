@@ -103,6 +103,17 @@ export function buildSnapshot(input: SnapshotInput): DashboardSnapshot {
     }
   }
 
+  const nearestKm = (kinds: string[]): number | null => {
+    const hit = nearest(
+      input.latest.filter((r) => kinds.includes(r.station.kind) && isTrackable(r, now)),
+      (r) => r.station,
+      place,
+      { radiusKm: Number.POSITIVE_INFINITY, limit: 1 },
+    )[0]
+    return hit ? Math.round(hit.distanceKm * 10) / 10 : null
+  }
+  const coverage = { nearestWaterKm: nearestKm(['canal', 'river']), nearestRainKm: nearestKm(['rain']) }
+
   const lines: SituationLine[] = []
   for (const w of water) lines.push({ level: w.level, text: waterLineTh(w, now), stationId: w.station.id })
   for (const f of roadFlood) {
@@ -152,6 +163,7 @@ export function buildSnapshot(input: SnapshotInput): DashboardSnapshot {
     weather: input.weather,
     radar: input.radar,
     sources: input.sources,
+    coverage,
     lastIngestAt: input.lastIngestAt,
     pollMinutes: input.pollMinutes,
   }
