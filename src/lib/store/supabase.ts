@@ -18,6 +18,11 @@ export interface SupabaseStoreOptions {
    * (Supabase default 1000), otherwise pagination stops early.
    */
   pageSize?: number
+  /**
+   * How long latest() is served from memory (ms). Every dashboard poll needs it and it reads
+   * the whole stations table; writes made through this instance clear the cache. 0 disables.
+   */
+  latestTtlMs?: number
 }
 
 type Row = Record<string, unknown>
@@ -101,6 +106,8 @@ export class SupabaseStore implements Store {
   readonly client: SupabaseClient
   private chunkSize: number
   private pageSize: number
+  private latestTtlMs: number
+  private latestCache: { at: number; rows: Promise<LatestRow[]> } | null = null
 
   constructor(opts: SupabaseStoreOptions) {
     this.client = createClient(opts.url, opts.serviceRoleKey, {
@@ -112,6 +119,7 @@ export class SupabaseStore implements Store {
     })
     this.chunkSize = Math.max(1, Math.min(500, opts.chunkSize ?? 500))
     this.pageSize = Math.max(1, opts.pageSize ?? 1000)
+    this.latestTtlMs = Math.max(0, opts.latestTtlMs ?? 30_000)
   }
 
   private check<T>(table: string, res: PgResult<T>): T | null {
@@ -135,6 +143,7 @@ export class SupabaseStore implements Store {
   // --- stations & readings -------------------------------------------------
   async upsertStations(stations: Station[]): Promise<void> {
     if (stations.length === 0) return
+    this.latestCache = null
     const now = new Date().toISOString()
     const rows = dedupeBy(stations, (s) => s.id).map((s) => ({
       id: s.id,
@@ -152,6 +161,7 @@ export class SupabaseStore implements Store {
 
   async insertReadings(readings: Reading[]): Promise<number> {
     if (readings.length === 0) return 0
+    this.latestCache = null
     const rows = dedupeBy(readings.map(readingToRow), (r) => `${String(r.station_id)}|${String(r.observed_at)}`)
     let inserted = 0
     for (const chunk of chunks(rows, this.chunkSize)) {
@@ -172,7 +182,33 @@ export class SupabaseStore implements Store {
     return rows.map((r) => parseData<Station>(r.data))
   }
 
+  async stationSources(ids: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    // Ids go into the URL query string: keep each request well under URL length limits.
+    for (const chunk of chunks([...new Set(ids)], 100)) {
+      const rows = this.check('stations', await this.client.from('stations').select('id,source').in('id', chunk)) ?? []
+      for (const r of rows as Row[]) out.set(String(r.id), String(r.source))
+    }
+    return out
+  }
+
   async latest(): Promise<LatestRow[]> {
+    const now = Date.now()
+    const cached = this.latestCache
+    if (cached && now - cached.at < this.latestTtlMs) return [...(await cached.rows)]
+    const rows = this.readLatest()
+    if (this.latestTtlMs > 0) {
+      const entry = { at: now, rows }
+      this.latestCache = entry
+      // A failed read must not be served from the cache.
+      rows.catch(() => {
+        if (this.latestCache === entry) this.latestCache = null
+      })
+    }
+    return [...(await rows)]
+  }
+
+  private async readLatest(): Promise<LatestRow[]> {
     const [stations, rows] = await Promise.all([
       this.listStations(),
       this.selectAll('latest_readings', (from, to) =>
@@ -203,6 +239,7 @@ export class SupabaseStore implements Store {
   }
 
   async pruneReadings(beforeIso: string): Promise<number> {
+    this.latestCache = null
     const res = await this.client.from('readings').delete({ count: 'exact' }).lt('observed_at', iso(beforeIso))
     this.check('readings', res)
     return res.count ?? 0

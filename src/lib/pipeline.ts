@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { AppConfig } from './config'
 import { evaluateAlerts } from './engine/alerts'
 import { buildSnapshot, nearestWaterStationIds, type SnapshotPlace } from './engine/snapshot'
@@ -50,11 +51,11 @@ function errorText(err: unknown): string {
  * are always stored — duplicates of (station, time) are ignored by the store.
  */
 export async function storeSourceResult(store: Store, result: SourceFetchResult): Promise<number> {
-  const existing = new Map((await store.listStations()).map((s) => [s.id, s]))
+  const existing = await store.stationSources(result.stations.map((s) => s.id))
   const incomingPriority = SOURCE_PRIORITY[result.source] ?? 0
   const upserts = result.stations.filter((s) => {
-    const prev = existing.get(s.id)
-    return !prev || (SOURCE_PRIORITY[prev.source] ?? 0) <= incomingPriority
+    const prevSource = existing.get(s.id)
+    return !prevSource || (SOURCE_PRIORITY[prevSource as keyof typeof SOURCE_PRIORITY] ?? 0) <= incomingPriority
   })
   await store.upsertStations(upserts)
   return store.insertReadings(result.readings)
@@ -271,12 +272,36 @@ export async function deliverEvent(deps: CycleDeps, place: Place, event: AlertEv
   return { ...event, deliveries }
 }
 
-/** Evaluate alert rules for every watched place and dispatch notifications. */
 /** Lease name/TTL that makes alert evaluation single-flight across processes. */
 export const ALERTS_LOCK = 'alerts'
 export const ALERTS_LOCK_TTL_MS = 5 * 60_000
 /** When every channel of a place fails, re-raise the same findings this many more cycles. */
 export const MAX_DELIVERY_RETRIES = 3
+
+/** Fallback when the store's lease is unavailable (e.g. the Supabase locks migration was not run). */
+let localAlertsBusy = false
+
+async function acquireAlertsLease(deps: CycleDeps, owner: string): Promise<'store' | 'local' | null> {
+  try {
+    return (await deps.store.tryLock(ALERTS_LOCK, owner, ALERTS_LOCK_TTL_MS)) ? 'store' : null
+  } catch (err) {
+    // Fail open: a broken lease may cost a duplicate message across processes, never every alert.
+    deps.log?.(`[alerts] WARNING alerts lease unavailable (${errorText(err)}); using an in-process lock. Run every file in supabase/migrations.`)
+    if (localAlertsBusy) return null
+    localAlertsBusy = true
+    return 'local'
+  }
+}
+
+/**
+ * Fingerprint of the place settings that alert states depend on. States saved under other
+ * settings (e.g. by a cycle that raced a PATCH of location or thresholds) count as absent.
+ */
+export function alertSettingsKey(p: Place): string {
+  const parts = [p.lat, p.lng, p.radiusKm, p.maxStations, p.rapidRiseCm, p.notifyMinLevel,
+    p.freeboard.watch, p.freeboard.warning, p.freeboard.critical, p.rain.watch, p.rain.warning, p.rain.critical]
+  return createHash('sha256').update(JSON.stringify(parts)).digest('base64url').slice(0, 16)
+}
 
 /** Evaluate alert rules for every watched place and dispatch notifications. */
 export async function runAlerts(deps: CycleDeps): Promise<AlertReport> {
@@ -287,7 +312,8 @@ export async function runAlerts(deps: CycleDeps): Promise<AlertReport> {
 
   // Embedded worker, relay ingest and cron can overlap: only one may evaluate and send.
   const owner = `${process.pid}:${crypto.randomUUID()}`
-  if (!(await deps.store.tryLock(ALERTS_LOCK, owner, ALERTS_LOCK_TTL_MS))) {
+  const lease = await acquireAlertsLease(deps, owner)
+  if (!lease) {
     deps.log?.('[alerts] skipped: another process is evaluating alerts')
     return { ...report, skipped: true }
   }
@@ -312,7 +338,9 @@ export async function runAlerts(deps: CycleDeps): Promise<AlertReport> {
           staleMinutes: deps.config.STALE_MINUTES,
           now,
         })
-        const prev = await deps.store.getAlertStates(place.id)
+        const fp = alertSettingsKey(place)
+        // States without a fingerprint predate it: keep them so a deploy does not re-alert everyone.
+        const prev = (await deps.store.getAlertStates(place.id)).filter((st) => st.settings === undefined || st.settings === fp)
         const out = evaluateAlerts({
           place,
           water: snap.water,
@@ -347,7 +375,7 @@ export async function runAlerts(deps: CycleDeps): Promise<AlertReport> {
           }
         }
         // Save states after delivery so a crash mid-send re-evaluates next cycle.
-        await deps.store.setAlertStates(statesToSave)
+        await deps.store.setAlertStates(statesToSave.map((st) => ({ ...st, settings: fp })))
       } catch (err) {
         deps.log?.(`[alerts] place ${place.id} failed: ${errorText(err)}`)
       }
@@ -355,7 +383,8 @@ export async function runAlerts(deps: CycleDeps): Promise<AlertReport> {
     await deps.store.setMeta(META_LAST_ALERTS, now.toISOString())
     return report
   } finally {
-    await deps.store.unlock(ALERTS_LOCK, owner).catch(() => undefined)
+    if (lease === 'local') localAlertsBusy = false
+    else await deps.store.unlock(ALERTS_LOCK, owner).catch(() => undefined)
   }
 }
 

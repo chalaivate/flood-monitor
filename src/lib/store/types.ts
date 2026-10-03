@@ -25,6 +25,8 @@ export interface Store {
   /** Insert readings, ignoring duplicates of (stationId, observedAt). */
   insertReadings(readings: Reading[]): Promise<number>
   listStations(): Promise<Station[]>
+  /** `id → source` for the given station ids that exist (cheap lookup for the priority merge). */
+  stationSources(ids: string[]): Promise<Map<string, string>>
   /** Latest reading per station (null when none). */
   latest(): Promise<LatestRow[]>
   /** Readings for the given stations since `sinceIso`, ascending by observedAt. */

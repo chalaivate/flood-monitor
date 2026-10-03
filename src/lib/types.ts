@@ -200,6 +200,8 @@ export interface AlertState {
   lastValue?: number | null
   lastNotifiedAt?: string | null
   updatedAt: string
+  /** alertSettingsKey() of the place when this state was saved (absent on older states). */
+  settings?: string
 }
 
 export interface AlertEvent {

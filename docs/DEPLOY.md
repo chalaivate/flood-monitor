@@ -9,7 +9,11 @@
 | B. Vercel + Supabase + เครื่องดึงข้อมูลในไทย | เว็บบนคลาวด์ รองรับผู้ใช้จำนวนมาก | ได้ครบ (จากเครื่องในไทย) | Supabase Postgres | ฟรี tier ได้ |
 | C. คลาวด์อย่างเดียว (ไม่มีเครื่องในไทย) | ทดลอง/สำรอง | ใช้ข้อมูลทวนจาก ThaiWater แทน | SQLite หรือ Supabase | ฟรี tier ได้ |
 
-ทุกแบบต้องใช้ Node.js 22.13 ขึ้นไป (ใช้ `node:sqlite` ที่มากับ Node)
+ทุกแบบต้องใช้ Node.js 22.13 ขึ้นไป (ใช้ `node:sqlite` ที่มากับ Node — รุ่น 22.5–22.12 ต้องเปิด flag จึงใช้ไม่ได้)
+
+**ต้องเปิดผ่าน HTTPS** ถ้าจะใช้ Web Push, ติดตั้งเป็นแอป (PWA), ปุ่ม "ใช้ตำแหน่งของฉัน" และ webhook ของ LINE/Telegram —
+เบราว์เซอร์ปิดความสามารถเหล่านี้บน `http://` (ยกเว้น `http://localhost` สำหรับทดสอบในเครื่อง)
+ใช้ Cloudflare Tunnel (ตัวอย่างใน `docker-compose.yml`) หรือ reverse proxy ที่มี TLS (Caddy/nginx) แล้วตั้ง `PUBLIC_BASE_URL=https://<โดเมน>`
 
 ---
 
@@ -20,6 +24,15 @@ npm ci
 DATA_MODE=fixture EMBEDDED_WORKER=1 npm run dev
 # เปิด http://localhost:3000
 ```
+
+Windows (cmd/PowerShell) ตั้งตัวแปรแบบข้างบนไม่ได้ — ใส่ไว้ในไฟล์ `.env` แทน:
+
+```
+DATA_MODE=fixture
+EMBEDDED_WORKER=1
+```
+
+แล้วรัน `npm run dev`
 
 โหมด `fixture` ใช้จุดวัดจริงของ กทม. (ชื่อ พิกัด ความสูงตลิ่ง) แต่ระดับน้ำ ฝน และน้ำบนถนนเป็น **ค่าจำลอง** ที่มีพายุฝนวนรอบทุก ~61 ชม.
 หน้าเว็บแสดงป้าย "ข้อมูลตัวอย่าง" ตลอด และเก็บข้อมูลแยกไฟล์ (`data/flood-demo.db`) ไม่ปนกับข้อมูลจริง
@@ -40,26 +53,39 @@ docker compose up -d --build
 docker compose logs -f app      # ควรเห็น [ingest] bma-canal: ~312 stations
 ```
 
-- เว็บอยู่ที่ `http://<เครื่อง>:3000` — ตัวดึงข้อมูลรันในเซิร์ฟเวอร์เดียวกัน (`EMBEDDED_WORKER=1`) ทุก `POLL_MINUTES` นาที
+- เว็บอยู่ที่ `http://<เครื่อง>:3000` สำหรับทดสอบในวง LAN — ตัวดึงข้อมูลรันในเซิร์ฟเวอร์เดียวกัน (`EMBEDDED_WORKER=1`) ทุก `POLL_MINUTES` นาที
+  (ใช้งานจริงต้องเป็น HTTPS ดูหัวข้อด้านบน)
 - เปิดให้คนนอกเข้าถึงโดยไม่ต้องเปิด port: ใช้ Cloudflare Tunnel (มีตัวอย่าง service `cloudflared` ใน `docker-compose.yml`) แล้วตั้ง `PUBLIC_BASE_URL` เป็นโดเมนนั้น
   และตั้ง `TRUST_PROXY=cloudflare` เพื่อให้จำกัดคำขอต่อ IP ของผู้ใช้จริงได้ (ดู [TRUST_PROXY](#trust_proxy-ip-ของผู้ใช้สำหรับการจำกัดคำขอ))
+  เมื่อใช้ tunnel ให้ผูกพอร์ตไว้ที่ `127.0.0.1:3000:3000` (หรือลบ `ports:` ออก เพราะ cloudflared เข้าถึง `http://app:3000` ผ่านเครือข่ายของ compose อยู่แล้ว)
+  ไม่เช่นนั้นคนนอกจะยิงตรงเข้าพอร์ต 3000 พร้อม header ปลอมได้
+- หยุด/อัปเดต: `docker compose down` / `git pull && docker compose up -d --build` — เซิร์ฟเวอร์รอรอบดึงข้อมูลที่ค้างอยู่ให้จบก่อนปิด ข้อมูลอยู่ใน `./data` ไม่หายเมื่อ build ใหม่
 - สำรองข้อมูล: `sqlite3 data/flood.db ".backup backup.db"`
 - ตรวจสุขภาพ: `curl http://localhost:3000/api/health`
 
 ไม่ใช้ Docker ก็ได้:
 
 ```bash
-npm ci && npm run build
-EMBEDDED_WORKER=1 node .next/standalone/server.js   # คัดลอก .next/static และ public ไปไว้ข้าง ๆ ตามคู่มือ Next.js standalone
-# หรือแยกเป็นสองโปรเซส: `npm start` (เว็บ) + `npm run worker` (ตัวดึงข้อมูล) ใช้ DATA_DIR เดียวกันได้ (SQLite WAL)
+npm ci && npm run build           # build จะคัดลอก public และ .next/static เข้า .next/standalone ให้เอง
+# ใน .env: EMBEDDED_WORKER=1 และ DATA_DIR=/ที่อยู่เต็ม/ของ/flood-monitor/data (ควรเป็น path เต็ม)
+npm run start:standalone          # = node --env-file-if-exists=.env .next/standalone/server.js (รันจากโฟลเดอร์โปรเจกต์)
 ```
+
+หรือแยกเป็นสองโปรเซส: `npm start` (เว็บ) + `npm run worker` (ตัวดึงข้อมูล) ใช้ DATA_DIR เดียวกันได้ (SQLite WAL)
+— `npm start` จะพิมพ์คำเตือน `"next start" does not work with "output: standalone"` ซึ่งไม่มีผลกับการทำงาน
+
+ห้ามเก็บฐานข้อมูลไว้ใน `.next/` เพราะ `npm run build` ครั้งถัดไปจะลบทิ้ง:
+ถ้า `DATA_DIR` เป็น path สัมพัทธ์และชี้เข้าไปใน `.next` (เช่นรัน `node .next/standalone/server.js` ตรง ๆ) ระบบจะใช้โฟลเดอร์ที่สั่งรันแทน หรือไม่ยอมเริ่มทำงาน
 
 ---
 
 ## B. Vercel + Supabase + เครื่องดึงข้อมูลในไทย
 
-1. **Supabase**: สร้างโปรเจกต์ แล้วรัน `supabase/migrations/20261003000000_init.sql` (SQL Editor หรือ `supabase db push`)
+1. **Supabase**: สร้างโปรเจกต์ แล้วรัน **ทุกไฟล์** ใน `supabase/migrations/` ตามลำดับชื่อไฟล์
+   (`supabase db push` ทำให้ครบเอง หรือวางทีละไฟล์ใน SQL Editor: `…_init.sql` แล้ว `…_locks.sql`)
    ตารางทั้งหมดเปิด RLS และไม่มี policy สำหรับ anon — เซิร์ฟเวอร์ใช้ service role key เท่านั้น
+   **อัปเดตจากรุ่นก่อน:** รันไฟล์ migration ใหม่ที่ยังไม่เคยรัน (ทุกไฟล์เขียนแบบรันซ้ำได้)
+   ถ้าขาด `…_locks.sql` ระบบยังแจ้งเตือนได้ แต่จะเขียน log `alerts lease unavailable` ทุกรอบ และอาจส่งข้อความซ้ำถ้ามีหลายโปรเซส
 2. **Vercel**: import repo นี้ ตั้ง Environment Variables
    ```
    STORE=supabase
@@ -93,9 +119,19 @@ EMBEDDED_WORKER=1 node .next/standalone/server.js   # คัดลอก .next/s
 ถ้าเซิร์ฟเวอร์อยู่ต่างประเทศและไม่ได้ใช้ Supabase เครื่องในไทยสามารถดึงเฉพาะแหล่งข้อมูล กทม. แล้วส่งขึ้นไปให้
 
 ```bash
-# ทั้งสองฝั่งตั้ง INGEST_TOKEN ค่าเดียวกัน
+# เครื่องในไทย — ทั้งสองฝั่งตั้ง INGEST_TOKEN ค่าเดียวกัน
 npm run worker -- --relay https://<โดเมน>
 ```
+
+ฝั่งเซิร์ฟเวอร์ที่รับข้อมูลต้องตั้งค่า:
+
+```
+INGEST_TOKEN=<ค่าเดียวกับเครื่องในไทย>
+SOURCES=thaiwater-canal,thaiwater-wl,thaiwater-rain,thaiwater-road   # ห้ามมี bma-* เพราะต่างประเทศดึงไม่ได้ และจะเขียนสถานะ "ขัดข้อง" ทับข้อมูลจาก relay
+EMBEDDED_WORKER=1        # หรือ cron เรียก /api/cron/poll — เพื่อดึง ThaiWater และลบข้อมูลเก่า
+```
+
+เซิร์ฟเวอร์ลบข้อมูลที่เก่ากว่า `HISTORY_HOURS` หลังรับข้อมูลจาก relay ทุกครั้งด้วย
 
 ---
 
@@ -110,14 +146,32 @@ npm run worker -- --relay https://<โดเมน>
 
 | ช่องทาง | ขั้นตอน |
 |---|---|
-| Web Push | `npm run vapid` แล้วคัดลอก 3 บรรทัดที่ได้ลง `.env` (เปลี่ยนกุญแจแล้วผู้ใช้เดิมต้องเปิดการแจ้งเตือนใหม่) |
-| LINE | LINE Developers Console → สร้าง Provider + Messaging API channel → ออก Channel access token (long-lived) → ใส่ `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET`, `LINE_ADD_FRIEND_URL` → ตั้ง Webhook URL `https://<โดเมน>/api/line/webhook` และเปิด Use webhook, ปิด Auto-reply ใน LINE Official Account Manager |
+| Web Push | `npm run --silent vapid` แล้ว **แทนที่** บรรทัด `VAPID_*` ที่ว่างอยู่ใน `.env` ด้วยค่าที่ได้ (ต้องมี `--silent` ไม่เช่นนั้น npm จะพิมพ์บรรทัด `> flood-monitor…` ปนมาด้วย) — เครื่องที่มีแต่ Docker: ดูคำสั่งด้านล่าง. เปลี่ยนกุญแจแล้วผู้ใช้เดิมต้องเปิดการแจ้งเตือนใหม่ |
+| LINE | ดูขั้นตอนด้านล่าง (ตั้งแต่ ก.ย. 2567 ต้องสร้าง LINE Official Account ก่อน) |
 | Telegram | @BotFather → `/newbot` → ใส่ `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET` → ลงทะเบียน webhook: `curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<โดเมน>/api/telegram/webhook&secret_token=<SECRET>"` |
 | ntfy | ไม่ต้องตั้งค่า (หรือใช้เซิร์ฟเวอร์ของตัวเองด้วย `NTFY_BASE_URL`) |
 | อีเมล | สมัคร Resend, ยืนยันโดเมนผู้ส่ง, ใส่ `RESEND_API_KEY` และ `EMAIL_FROM` |
 | Discord | ไม่ต้องตั้งค่า |
 
-ช่องทางที่ไม่ได้ตั้งค่าจะถูกซ่อนในหน้า "แจ้งเตือน" โดยอัตโนมัติ (อ่านจาก `/api/config/public`)
+ช่องทางที่ไม่ได้ตั้งค่า (หรือตั้งไม่ครบชุด) จะถูกซ่อนในหน้า "แจ้งเตือน" โดยอัตโนมัติ (อ่านจาก `/api/config/public`)
+อีเมลต้องตั้ง `PUBLIC_BASE_URL` ด้วย เพราะลิงก์ยืนยันในอีเมลต้องชี้ไปที่โดเมนจริง
+
+### สร้างกุญแจ Web Push บนเครื่องที่มีแต่ Docker
+
+```bash
+docker compose run --rm app node -e "const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\nVAPID_PRIVATE_KEY='+k.privateKey)"
+```
+
+แล้วใส่ `VAPID_SUBJECT=mailto:<อีเมลผู้ดูแล>` เพิ่มเอง
+
+### LINE
+
+1. สร้าง LINE Official Account ที่ [manager.line.biz](https://manager.line.biz)
+2. ใน LINE Official Account Manager → ตั้งค่า → Messaging API → เปิดใช้ Messaging API แล้วเลือก Provider
+3. ใน [LINE Developers Console](https://developers.line.biz/console/) → channel ที่เพิ่งเกิด → แท็บ Messaging API → ออก Channel access token (long-lived) ใส่ `LINE_CHANNEL_ACCESS_TOKEN`
+   และคัดลอก Channel secret จากแท็บ Basic settings ใส่ `LINE_CHANNEL_SECRET`
+4. ตั้ง Webhook URL เป็น `https://<โดเมน>/api/line/webhook` กด Verify และเปิด Use webhook
+5. ใน LINE Official Account Manager ปิดข้อความตอบกลับอัตโนมัติและข้อความทักทาย แล้วคัดลอกลิงก์เพิ่มเพื่อนใส่ `LINE_ADD_FRIEND_URL`
 
 ---
 

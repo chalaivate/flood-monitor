@@ -29,6 +29,8 @@
 7. **ข้อมูลค้าง/ขัดข้อง** ไม่ทำให้เกิดการแจ้งเตือน และไม่ลบสถานะเดิม — เมื่อเซนเซอร์กลับมา ระบบเทียบกับสถานะล่าสุดก่อนขาดหาย
 8. **ตลิ่งไม่แน่นอน** (ข้อมูลตลิ่งของหน่วยงานผิดปกติ) ยกระดับได้ไม่เกิน "เฝ้าระวัง"
 9. ทุกเหตุการณ์ในรอบเดียวกันของสถานที่เดียวกัน **รวมเป็นข้อความเดียว** (หัวข้อเป็นเรื่องที่รุนแรงที่สุด + "อีก N รายการ")
+10. **แก้ตำแหน่งหรือเกณฑ์** — ระบบเริ่มประเมินใหม่เหมือนสร้างการติดตามครั้งแรก (ถ้าอยู่ในระดับที่เลือกอยู่แล้วจะแจ้งทันที)
+11. **ส่งไม่สำเร็จทุกช่องทาง** (ผู้ให้บริการขัดข้อง) — ส่งเรื่องเดิมซ้ำในรอบถัดไป สูงสุด 3 ครั้ง
 
 ตัวอย่างข้อความ:
 
@@ -47,10 +49,10 @@ https://your-host/?place=…
 | ช่องทาง | ผู้ดูแลระบบต้องตั้งค่า | ผู้ใช้ต้องทำ |
 |---|---|---|
 | Web Push (แจ้งเตือนบนเบราว์เซอร์/มือถือ) | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (สร้างด้วย `npm run vapid`) | กดอนุญาตการแจ้งเตือน (iPhone/iPad: ต้อง "เพิ่มลงหน้าจอโฮม" ก่อน, iOS 16.4+) |
-| LINE (Messaging API) | สร้าง LINE Official Account + Messaging API channel, ใส่ `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET`, `LINE_ADD_FRIEND_URL`, ตั้ง webhook เป็น `https://<host>/api/line/webhook` | เพิ่มเพื่อน แล้วพิมพ์รหัส 6 ตัวที่ได้จากหน้าเว็บ |
+| LINE (Messaging API) | สร้าง LINE Official Account ก่อน แล้วเปิด Messaging API ([ขั้นตอน](DEPLOY.md#line)), ใส่ `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET`, `LINE_ADD_FRIEND_URL`, ตั้ง webhook เป็น `https://<host>/api/line/webhook` | เพิ่มเพื่อน แล้วพิมพ์รหัส 8 ตัวที่ได้จากหน้าเว็บ (รหัสหมดอายุใน 60 นาที) |
 | Telegram | สร้างบอทกับ @BotFather, ใส่ `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET`, ตั้ง webhook | กดลิงก์ `t.me/<bot>?start=<รหัส>` |
 | ntfy | ไม่ต้อง (ค่าเริ่มต้น `https://ntfy.sh`) | ติดตั้งแอป ntfy แล้ว subscribe หัวข้อที่ตั้งชื่อเดายาก |
-| อีเมล | `RESEND_API_KEY`, `EMAIL_FROM` (โดเมนที่ยืนยันกับ Resend แล้ว) | กดลิงก์ยืนยันในอีเมล |
+| อีเมล | `RESEND_API_KEY`, `EMAIL_FROM` (โดเมนที่ยืนยันกับ Resend แล้ว) และ `PUBLIC_BASE_URL` | กดลิงก์ในอีเมล แล้วกดปุ่ม "ยืนยันการรับแจ้งเตือน" ในหน้าที่เปิดขึ้น (การเปิดลิงก์อย่างเดียวไม่ยืนยัน เพื่อกันระบบสแกนลิงก์ของอีเมล) |
 | Discord | ไม่ต้อง | วาง Webhook URL ของห้องแชต |
 
 > LINE Notify ปิดบริการแล้ว (31 มี.ค. 2568) จึงใช้ LINE Messaging API แทน — ข้อความ push มีโควตาต่อเดือนตามแพ็กเกจของ Official Account

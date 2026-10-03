@@ -162,6 +162,19 @@ export class SqliteStore implements Store {
       .map((r) => JSON.parse(String((r as Row).data)) as Station)
   }
 
+  async stationSources(ids: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    // SQLite's default variable limit is 32766; stay well below it.
+    for (let i = 0; i < ids.length; i += 500) {
+      const chunk = ids.slice(i, i + 500)
+      const rows = this.db
+        .prepare(`SELECT id, source FROM stations WHERE id IN (${chunk.map(() => '?').join(',')})`)
+        .all(...chunk) as Row[]
+      for (const r of rows) out.set(String(r.id), String(r.source))
+    }
+    return out
+  }
+
   async latest(): Promise<LatestRow[]> {
     const stations = await this.listStations()
     const rows = this.db

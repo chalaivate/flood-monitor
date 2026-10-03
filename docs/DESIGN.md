@@ -87,6 +87,13 @@ rapid rise ≥ `rapidRiseCm` (10) cm/h when already ≥ watch or projected to re
 (cooldown 2 h); rain escalation; road flood escalation. All findings of one cycle merge into one
 message per place.
 
+`runAlerts` is single-flight across processes through a store lease (`tryLock('alerts')`, 5 min TTL;
+SQLite `locks` table, Supabase `try_lock` RPC). If the lease itself errors (e.g. the locks migration
+was not run) it falls back to an in-process lock and logs a warning: a broken lease may duplicate a
+message across processes but never silences alerts. Each saved `AlertState` carries
+`settings = alertSettingsKey(place)`; states saved under other place settings (a cycle racing a PATCH)
+count as absent. When every channel of a place fails, the findings are re-raised next cycle (≤ 3 times).
+
 ## 5. HTTP API (JSON unless noted)
 
 Public (no auth):

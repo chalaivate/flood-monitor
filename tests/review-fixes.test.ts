@@ -5,7 +5,7 @@ import { evaluateAlerts, MAX_BODY_CHARS, mergeFindings, type Finding } from '@/l
 import { buildSnapshot } from '@/lib/engine/snapshot'
 import { stationStatus } from '@/lib/engine/status'
 import type { ChannelSender, NotifyMessage } from '@/lib/notify/types'
-import { fetchPolitely, META_LAST_INGEST, runAlerts, runIngest } from '@/lib/pipeline'
+import { alertSettingsKey, fetchPolitely, META_LAST_INGEST, runAlerts, runIngest, storeSourceResult } from '@/lib/pipeline'
 import { HttpError } from '@/lib/sources/http'
 import { fetchProvinces, parseRain24, parseWaterlevel, rowsOf } from '@/lib/sources/thaiwater'
 import type { SourceAdapter } from '@/lib/sources/types'
@@ -313,5 +313,93 @@ describe('frozen source detection', () => {
       now,
     )
     expect(res.map((r) => r.source.source)).toEqual(['thaiwater-canal'])
+  })
+})
+
+describe('round 3 fixes', () => {
+  it('still evaluates alerts when the store lease is broken (missing Supabase migration)', async () => {
+    const store = await seeded()
+    store.tryLock = async () => {
+      throw new Error('supabase locks: Could not find the function public.try_lock')
+    }
+    const snd = sender(true)
+    const logs: string[] = []
+    const deps = { store, config, sources: [], senders: [snd], fetch, now: () => NOW, log: (m: string) => logs.push(m) }
+    const [a, b] = await Promise.all([runAlerts(deps), runAlerts(deps)])
+    expect(snd.sent).toHaveLength(1) // in-process fallback keeps it single-flight
+    expect([a.skipped, b.skipped].filter(Boolean)).toHaveLength(1)
+    expect(logs.some((m) => m.includes('alerts lease unavailable'))).toBe(true)
+    const again = await runAlerts(deps) // the fallback lock was released
+    expect(again.skipped).toBeUndefined()
+    store.close()
+  })
+
+  it('ignores alert states saved under other place settings', async () => {
+    const store = await seeded()
+    const snd = sender(true)
+    const deps = { store, config, sources: [], senders: [snd], fetch, now: () => NOW }
+    await runAlerts(deps)
+    expect(snd.sent).toHaveLength(1)
+    const saved = await store.getAlertStates('p1')
+    expect(saved.every((s) => s.settings === alertSettingsKey(place()))).toBe(true)
+    await runAlerts(deps)
+    expect(snd.sent).toHaveLength(1) // same settings → quiet
+
+    // A cycle that raced a PATCH saved states for the old settings; the new settings start fresh.
+    await store.updatePlace(place({ lat: 13.7215, lng: 100.7505 }))
+    await runAlerts(deps)
+    expect(snd.sent).toHaveLength(2)
+
+    // Legacy states without a fingerprint are trusted (no re-alert storm after deploying this).
+    const legacy = (await store.getAlertStates('p1')).map((st): AlertState => ({ ...st, settings: undefined }))
+    await store.setAlertStates(legacy)
+    await runAlerts(deps)
+    expect(snd.sent).toHaveLength(2)
+    store.close()
+  })
+
+  it('looks up only the incoming station ids for the priority merge', async () => {
+    const store = new SqliteStore(':memory:')
+    const bma = canal('X', 13.7, 100.7, 1.2)
+    await store.upsertStations([bma, canal('Y', 13.7, 100.7, 1)])
+    expect(await store.stationSources([bma.id, 'canal:missing'])).toEqual(new Map([[bma.id, 'bma-canal']]))
+    await storeSourceResult(store, {
+      source: 'thaiwater-canal',
+      stations: [{ ...bma, source: 'thaiwater-canal', bankLevel: 0.5 }],
+      readings: [],
+      fetchedAt: NOW.toISOString(),
+      warnings: [],
+    })
+    expect((await store.listStations()).find((s) => s.id === bma.id)?.bankLevel).toBe(1.2)
+    store.close()
+  })
+
+  it('treats blank env values as defaults and clamps out-of-range numbers', () => {
+    const warnings: string[] = []
+    const c = loadConfig(
+      { RUN_ALERTS: '', EMBEDDED_WORKER: ' ', DATA_MODE: '', STORE: '', THAIWATER_PROVINCES: '', NTFY_BASE_URL: '', DATA_DIR: '', POLL_MINUTES: '0', HISTORY_HOURS: '12', SOURCES: 'thaiwater-wl,popnix' },
+      { warn: (m) => warnings.push(m), cwd: '/srv/app' },
+    )
+    expect(c.RUN_ALERTS).toBe('1')
+    expect(c.EMBEDDED_WORKER).toBe('0')
+    expect(c.DATA_MODE).toBe('live')
+    expect(c.STORE).toBe('sqlite')
+    expect(c.THAIWATER_PROVINCES).toBe('10,11,12,13')
+    expect(c.NTFY_BASE_URL).toBe('https://ntfy.sh')
+    expect(c.DATA_DIR).toBe('/srv/app/data')
+    expect(c.POLL_MINUTES).toBe(2)
+    expect(c.HISTORY_HOURS).toBe(48)
+    expect(c.enabledSources).toEqual(['thaiwater-wl'])
+    expect(warnings.join('\n')).toMatch(/POLL_MINUTES=0.*using 2/)
+    expect(warnings.join('\n')).toMatch(/unknown popnix/)
+  })
+
+  it('keeps a relative DATA_DIR out of .next (standalone server chdirs there)', () => {
+    const warnings: string[] = []
+    const cwd = '/srv/app/.next/standalone'
+    expect(loadConfig({ PWD: '/srv/app' }, { cwd, warn: (m) => warnings.push(m) }).DATA_DIR).toBe('/srv/app/data')
+    expect(warnings[0]).toMatch(/inside \.next/)
+    expect(() => loadConfig({}, { cwd, warn: () => undefined })).toThrow(/absolute DATA_DIR/)
+    expect(loadConfig({ DATA_DIR: '/var/lib/flood' }, { cwd }).DATA_DIR).toBe('/var/lib/flood')
   })
 })

@@ -40,7 +40,7 @@ function fakePostgrest(route: (req: Req) => Reply | undefined) {
 
 const KEY = 'service-role-key'
 
-function makeStore(route: (req: Req) => Reply | undefined, opts: { pageSize?: number; chunkSize?: number } = {}) {
+function makeStore(route: (req: Req) => Reply | undefined, opts: { pageSize?: number; chunkSize?: number; latestTtlMs?: number } = {}) {
   const fake = fakePostgrest(route)
   const store = new SupabaseStore({ url: 'https://proj.supabase.co', serviceRoleKey: KEY, fetch: fake.fetchImpl, ...opts })
   return { store, requests: fake.requests }
@@ -263,5 +263,41 @@ describe('SupabaseStore', () => {
   it('throws with the table name on PostgREST errors', async () => {
     const { store } = makeStore(() => ({ status: 400, json: { message: 'relation "public.meta" does not exist', code: '42P01' } }))
     await expect(store.setMeta('k', 'v')).rejects.toThrow(/supabase meta: relation/)
+  })
+})
+
+describe('SupabaseStore request volume', () => {
+  it('reads only id,source for the requested stations', async () => {
+    const { store, requests } = makeStore((req) =>
+      req.table === 'stations' ? { json: [{ id: station(1).id, source: 'bma-canal' }] } : undefined,
+    )
+    const out = await store.stationSources([station(1).id, station(2).id, station(1).id])
+    expect(out).toEqual(new Map([[station(1).id, 'bma-canal']]))
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.url.searchParams.get('select')).toBe('id,source')
+    expect(requests[0]!.url.searchParams.get('id')).toBe(`in.(${station(1).id},${station(2).id})`)
+  })
+
+  it('serves latest() from memory for a short time and drops the cache on writes', async () => {
+    const route = (req: Req): Reply | undefined => {
+      if (req.table === 'stations' && req.method === 'GET') return { json: [{ data: station(1) }] }
+      if (req.table === 'latest_readings') return { json: [] }
+      if (req.table === 'readings') return { status: 201, json: [] }
+      return undefined
+    }
+    const { store, requests } = makeStore(route)
+    await store.latest()
+    const afterFirst = requests.length
+    await store.latest()
+    expect(requests.length).toBe(afterFirst) // cached
+    await store.insertReadings([{ stationId: station(1).id, observedAt: '2026-10-03T00:00:00.000Z', waterLevel: 0.5 }])
+    const afterWrite = requests.length
+    await store.latest()
+    expect(requests.length).toBe(afterWrite + afterFirst) // re-read after a write
+
+    const uncached = makeStore(route, { latestTtlMs: 0 })
+    await uncached.store.latest()
+    await uncached.store.latest()
+    expect(uncached.requests.length).toBe(2 * afterFirst)
   })
 })

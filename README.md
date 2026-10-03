@@ -30,6 +30,7 @@ DATA_MODE=fixture EMBEDDED_WORKER=1 npm run dev
 ```
 
 ต้องใช้ Node.js 22.13+ — โหมดสาธิตใช้จุดวัดจริงแต่ค่าทั้งหมดเป็นค่าจำลอง (มีป้ายแจ้งบนหน้าเว็บ)
+บน Windows ให้ใส่ `DATA_MODE=fixture` และ `EMBEDDED_WORKER=1` ในไฟล์ `.env` แล้วรัน `npm run dev`
 
 ## ใช้งานจริง
 
@@ -40,7 +41,10 @@ cp .env.example .env && mkdir -p data && sudo chown 1000:1000 data
 docker compose up -d --build
 ```
 
-หรือใช้ **Vercel + Supabase** สำหรับหน้าเว็บ และให้เครื่องในไทยรัน `npm run worker` ดึงข้อมูล — ดูทุกรูปแบบใน [docs/DEPLOY.md](docs/DEPLOY.md)
+หรือใช้ **Vercel + Supabase** สำหรับหน้าเว็บ (รันทุกไฟล์ใน `supabase/migrations/` ตามลำดับ) และให้เครื่องในไทยรัน `npm run worker` ดึงข้อมูล
+— ดูทุกรูปแบบใน [docs/DEPLOY.md](docs/DEPLOY.md)
+
+Web Push, ปุ่มใช้ตำแหน่งของฉัน และ webhook ของ LINE/Telegram ต้องเปิดผ่าน **HTTPS** (เช่น Cloudflare Tunnel) — `http://localhost` ใช้ทดสอบได้
 
 ## โครงสร้าง
 
@@ -66,7 +70,7 @@ npm run typecheck
 npm run lint
 npm run build
 npm run worker:once   # ดึงข้อมูลหนึ่งรอบ
-npm run vapid         # สร้างกุญแจ Web Push
+npm run --silent vapid   # สร้างกุญแจ Web Push
 ```
 
 ## ที่มาของข้อมูลและเงื่อนไข

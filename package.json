@@ -5,12 +5,14 @@
   "description": "ระบบเฝ้าระวังและแจ้งเตือนภัยน้ำท่วมตามตำแหน่งผู้ใช้ (Thailand flood early-warning)",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "postbuild": "node scripts/standalone-assets.mjs",
+    "start:standalone": "node --env-file-if-exists=.env .next/standalone/server.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
