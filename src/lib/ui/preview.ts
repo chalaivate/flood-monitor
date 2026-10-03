@@ -108,10 +108,10 @@ export function applyVariant(s: DashboardSnapshot, variant: PreviewVariant): Das
     c.overall.level = 'critical'
     c.overall.headline = 'วิกฤต — น้ำใกล้ตลิ่ง 2 จุด · น้ำท่วมถนน 1 จุด · ฝนหนักมาก'
     c.overall.lines = c.overall.lines.map((l) => {
-      if (l.stationId === first?.station.id) {
+      if (first && l.stationId === first.station.id) {
         return { ...l, level: 'critical' as Level, text: `${first.station.name}: น้ำ ${first.reading?.waterLevel?.toFixed(2)} ม. ตลิ่ง ${first.station.bankLevel?.toFixed(2)} ม. ห่างตลิ่ง 0.06 ม. ขึ้น 12 ซม./ชม.` }
       }
-      if (l.stationId === second?.station.id) {
+      if (second && l.stationId === second.station.id) {
         return { ...l, level: 'warning' as Level, text: `${second.station.name}: น้ำ ${second.reading?.waterLevel?.toFixed(2)} ม. ตลิ่ง ${second.station.bankLevel?.toFixed(2)} ม. ห่างตลิ่ง 0.24 ม. ขึ้น 6 ซม./ชม.` }
       }
       if (l.stationId === c.rainMax24h?.station.id) {

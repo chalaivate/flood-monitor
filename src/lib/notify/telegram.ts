@@ -26,7 +26,12 @@ export async function telegramSendMessage(
     const res = await fetchImpl(`${TELEGRAM_API}/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: Array.from(text).slice(0, TELEGRAM_TEXT_MAX).join(''), disable_web_page_preview: true }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: Array.from(text).slice(0, TELEGRAM_TEXT_MAX).join(''),
+        // Bot API 7+ replaced `disable_web_page_preview` with link_preview_options.
+        link_preview_options: { is_disabled: true },
+      }),
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     })
     const raw = await readErrorBody(res, 2000)

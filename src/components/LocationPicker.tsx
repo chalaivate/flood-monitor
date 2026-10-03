@@ -104,7 +104,7 @@ export function LocationPicker({ value, onChange, mapHeight = 280 }: { value: Pl
           id={`${uid}-label`}
           type="text"
           value={value.label}
-          maxLength={80}
+          maxLength={60}
           placeholder="เช่น บ้าน ประเวศ"
           onChange={(e) => set({ label: e.target.value })}
           className="fm-input w-full"
@@ -121,7 +121,7 @@ export function LocationPicker({ value, onChange, mapHeight = 280 }: { value: Pl
           </button>
         </div>
         <div className="overflow-hidden rounded-xl border border-border" style={{ height: mapHeight }}>
-          <PickerMap lat={lat} lng={lng} radiusKm={value.radiusKm} stations={all} onPick={(la, ln) => set({ lat: la, lng: ln })} />
+          <PickerMap lat={lat} lng={lng} radiusKm={value.radiusKm} stations={all} hasPoint={hasPoint} onPick={(la, ln) => set({ lat: la, lng: ln })} />
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
           <span className="inline-flex items-center gap-1">
@@ -164,7 +164,7 @@ export function LocationPicker({ value, onChange, mapHeight = 280 }: { value: Pl
         )}
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
           <label htmlFor={`${uid}-radius`} className="mb-1 flex items-baseline justify-between text-sm font-medium text-text-2">
             <span>รัศมีค้นหาจุดวัด</span>

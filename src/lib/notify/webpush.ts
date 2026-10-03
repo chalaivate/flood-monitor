@@ -56,7 +56,8 @@ export function buildPayload(msg: NotifyMessage): string {
   for (;;) {
     const json = JSON.stringify({ ...base, body })
     if (Buffer.byteLength(json, 'utf8') <= MAX_PAYLOAD_BYTES || body.length === 0) return json
-    body = truncate(body, Math.floor(Array.from(body).length * 0.8))
+    const n = Array.from(body).length
+    body = n <= 1 ? '' : truncate(body, Math.floor(n * 0.8))
   }
 }
 

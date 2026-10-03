@@ -111,6 +111,10 @@ export function usePolled<T>(key: string | null, load: (signal: AbortSignal) => 
     }
   }, [key, intervalMs, nonce])
 
+  // A paused hook (key null) exposes nothing, so callers never act on data of a key they dropped.
+  if (key === null) {
+    return { data: null, error: null, errorStatus: null, updatedAt: null, carriedOver: false, refresh: () => setNonce((n) => n + 1) }
+  }
   return {
     data: state.data,
     error: state.error,

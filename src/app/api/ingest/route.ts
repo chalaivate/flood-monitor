@@ -35,6 +35,11 @@ export const POST = handler('ingest', async (req: Request) => {
     const n = await storeSourceResult(store, result as SourceFetchResult)
     inserted += n
     perSource.push({ source: result.source, stations: result.stations.length, readings: result.readings.length, inserted: n })
+    let latestObservationAt: string | null = null
+    for (const r of result.readings) {
+      const t = new Date(r.observedAt).toISOString()
+      if (!latestObservationAt || t > latestObservationAt) latestObservationAt = t
+    }
     await store.setSourceHealth({
       source: result.source,
       ok: true,
@@ -42,6 +47,7 @@ export const POST = handler('ingest', async (req: Request) => {
       lastSuccessAt: result.fetchedAt,
       error: null,
       stationCount: result.stations.length,
+      latestObservationAt,
     })
   }
   for (const f of payload.failures) {
@@ -53,6 +59,7 @@ export const POST = handler('ingest', async (req: Request) => {
       lastSuccessAt: prev?.lastSuccessAt ?? null,
       error: f.error,
       stationCount: prev?.stationCount ?? 0,
+      latestObservationAt: prev?.latestObservationAt ?? null,
     })
   }
   if (payload.results.length > 0) await store.setMeta(META_LAST_INGEST, now)

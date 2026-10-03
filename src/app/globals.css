@@ -101,16 +101,6 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Card surface shared by every dashboard tile. */
-.card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-}
-
-.tabular {
-  font-variant-numeric: tabular-nums;
-}
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -124,4 +114,432 @@ body {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Component classes (plain CSS on tokens so they theme automatically). They live in
+   the `components` layer so Tailwind utilities (e.g. size-9, h-8, border-l-4) can
+   still override them on a given element.
+   --------------------------------------------------------------------------- */
+
+@layer components {
+  /* Card surface shared by every dashboard tile. */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  body {
+    line-height: 1.55; /* Thai stacked vowels/tones need room */
+  }
+
+
+  .fm-skip {
+    position: absolute;
+    left: 8px;
+    top: -48px;
+    z-index: 2000;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  .fm-skip:focus {
+    top: 8px;
+  }
+
+  /* Top bar tabs (HA style: icon + active underline). */
+  .fm-tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 46px;
+    padding: 0 10px;
+    color: var(--muted);
+    font-size: 0.95rem;
+    transition: color 120ms;
+  }
+  .fm-tab:hover {
+    color: var(--text);
+  }
+  .fm-tab-active {
+    color: var(--text);
+  }
+  .fm-tab-active::after {
+    content: '';
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 0;
+    height: 3px;
+    border-radius: 3px 3px 0 0;
+    background: var(--accent);
+  }
+  @media (min-width: 768px) {
+    .fm-tab {
+      padding: 0 14px;
+    }
+  }
+  /* Small phones: give the place chip more room. */
+  @media (max-width: 400px) {
+    .fm-tab {
+      min-width: 40px;
+      padding: 0 6px;
+    }
+    header .fm-icon-btn {
+      width: 36px;
+    }
+    header .fm-chip {
+      padding: 0 10px;
+      gap: 4px;
+    }
+  }
+
+  .fm-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    max-width: 100%;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    font-size: 0.875rem;
+    white-space: nowrap;
+  }
+  header .fm-chip {
+    max-width: min(42vw, 280px);
+  }
+  button.fm-chip:hover,
+  a.fm-chip:hover {
+    background: var(--card-2);
+  }
+  .fm-chip-accent {
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  }
+  .fm-chip-warn {
+    height: auto;
+    min-height: 32px;
+    white-space: normal;
+    border-color: color-mix(in srgb, var(--lv-watch) 70%, transparent);
+    background: color-mix(in srgb, var(--lv-watch) 12%, var(--card));
+    font-size: 0.8rem;
+    padding: 4px 12px;
+  }
+
+  .fm-icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    flex: none;
+    border-radius: 999px;
+    color: var(--text-2);
+    transition: background 120ms, color 120ms;
+  }
+  .fm-icon-btn:hover:not(:disabled) {
+    background: var(--card-2);
+    color: var(--text);
+  }
+  .fm-icon-btn:disabled {
+    opacity: 0.45;
+  }
+
+  .fm-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 999px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.3;
+    white-space: nowrap;
+    transition: background 120ms, border-color 120ms, opacity 120ms;
+  }
+  .fm-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .fm-btn-primary {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  .fm-btn-primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 86%, black);
+  }
+  .fm-btn-quiet {
+    border: 1px solid var(--border);
+    background: var(--card-2);
+    color: var(--text);
+  }
+  .fm-btn-quiet:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--text) 25%, transparent);
+  }
+  .fm-btn-danger {
+    border: 1px solid color-mix(in srgb, var(--lv-critical) 60%, transparent);
+    color: var(--text);
+    background: color-mix(in srgb, var(--lv-critical) 12%, var(--card));
+  }
+
+  .fm-input {
+    min-height: 40px;
+    padding: 6px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card-2);
+    color: var(--text);
+    font-size: 1rem; /* ≥16px avoids iOS zoom on focus */
+  }
+  .fm-input::placeholder {
+    color: var(--muted);
+  }
+  .fm-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
+  .fm-range {
+    accent-color: var(--accent);
+    height: 28px;
+  }
+
+  /* Segmented radio (station count, levels). */
+  .fm-seg {
+    position: relative;
+    display: inline-flex;
+  }
+  .fm-seg input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .fm-seg span {
+    display: inline-grid;
+    place-items: center;
+    min-width: 36px;
+    height: 36px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card-2);
+    color: var(--text-2);
+    font-size: 0.9rem;
+  }
+  .fm-seg input:checked + span {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, var(--card));
+    color: var(--text);
+    font-weight: 600;
+  }
+  .fm-seg input:focus-visible + span {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Small segmented tabs inside card headers. */
+  .fm-tabs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 999px;
+    background: var(--card-2);
+    border: 1px solid var(--border);
+  }
+  .fm-tabs-item {
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    color: var(--text-2);
+  }
+  .fm-tabs-item[aria-selected='true'] {
+    background: var(--card);
+    color: var(--text);
+    font-weight: 600;
+    box-shadow: 0 0 0 1px var(--border);
+  }
+
+  .fm-tooltip {
+    z-index: 20;
+    min-width: 120px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--card-2);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+
+  /* SVG text that sits on top of lines gets a halo in the surface colour. */
+  .fm-halo {
+    paint-order: stroke;
+    stroke: var(--card);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+  }
+
+  .fm-table th,
+  .fm-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--grid);
+  }
+  .fm-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--card);
+    color: var(--text-2);
+    font-weight: 500;
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .fm-dialog {
+    margin: auto;
+    width: min(760px, calc(100vw - 24px));
+    max-height: min(92dvh, 900px);
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--card);
+    color: var(--text);
+    overflow: hidden;
+  }
+  .fm-dialog[open] {
+    display: flex;
+    flex-direction: column;
+  }
+  .fm-dialog > form {
+    max-height: min(92dvh, 900px);
+  }
+  .fm-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+  }
+  @media (max-width: 639px) {
+    .fm-dialog {
+      width: 100vw;
+      max-width: 100vw;
+      height: 100dvh;
+      max-height: 100dvh;
+      border-radius: 0;
+      border: 0;
+    }
+    .fm-dialog > form {
+      max-height: 100dvh;
+      height: 100%;
+    }
+  }
+
+  @keyframes fm-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .fm-spin {
+    animation: fm-spin 0.9s linear infinite;
+  }
+}
+
+/* --- Leaflet theming ------------------------------------------------------- */
+/* Prefixed with .leaflet-container so these win over leaflet.css, which loads later.
+   Note: leaflet.css is unlayered, so it beats Tailwind utilities (layered) inside popups;
+   popup markup therefore uses <div>s rather than <p> (leaflet sets p margins). */
+html .leaflet-container {
+  background: var(--card-2);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+}
+html .leaflet-container .fm-basemap {
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.86) saturate(0.55);
+}
+@media (prefers-color-scheme: light) {
+  :root:where(:not([data-theme='dark'])) .leaflet-container .fm-basemap {
+    filter: none;
+  }
+}
+:root[data-theme='light'] .leaflet-container .fm-basemap {
+  filter: none;
+}
+html .leaflet-container .leaflet-popup-content-wrapper,
+html .leaflet-container .leaflet-popup-tip {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+html .leaflet-container .leaflet-popup-tip {
+  box-shadow: none;
+  border: 1px solid var(--border);
+}
+html .leaflet-container .leaflet-popup-content p {
+  margin: 0;
+}
+html .leaflet-container .leaflet-popup-content-wrapper {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+html .leaflet-container .leaflet-popup-content {
+  margin: 12px 14px;
+  line-height: 1.5;
+  font-size: 0.875rem;
+}
+html .leaflet-container a.leaflet-popup-close-button {
+  color: var(--muted);
+}
+html .leaflet-container .leaflet-tooltip {
+  background: var(--card-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: none;
+  font-family: var(--font-sans);
+}
+html .leaflet-container .leaflet-tooltip-top::before {
+  border-top-color: var(--card-2);
+}
+html .leaflet-container .leaflet-control-attribution {
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  color: var(--text-2);
+}
+html .leaflet-container .leaflet-control-attribution a {
+  color: var(--text);
+}
+html .leaflet-container .leaflet-bar {
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+html .leaflet-container .leaflet-bar a,
+html .leaflet-container .leaflet-bar a:hover {
+  background: var(--card);
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+html .leaflet-container .leaflet-bar a:hover {
+  background: var(--card-2);
+}
+html .leaflet-container .leaflet-bar a.leaflet-disabled {
+  background: var(--card);
+  color: var(--muted);
+}
+.fm-level-icon,
+.fm-home-icon {
+  background: transparent;
+  border: 0;
+}
+.fm-level-icon svg {
+  display: block;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.5));
 }

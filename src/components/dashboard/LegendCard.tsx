@@ -39,15 +39,13 @@ export function LegendCard({ snapshot, nowMs }: { snapshot: DashboardSnapshot; n
           <LevelDot level="unknown" size={11} decorative /> ไม่มีข้อมูล
         </li>
       </ul>
-      <p className="mt-1.5 text-xs text-muted">
-        ข้อมูล: {agencies.length ? agencies.join(' · ') : 'สำนักการระบายน้ำ กทม.'}
-        {down.map(([label, v]) => (
-          <span key={label}>
-            {' '}
-            · {label} ขัดข้อง{v.lastSuccessAt ? ` (สำเร็จล่าสุด ${durationTh(minutesBetween(v.lastSuccessAt, new Date(nowMs)))} ที่แล้ว)` : ''}
-          </span>
-        ))}
-      </p>
+      <p className="mt-1.5 text-xs text-muted">ข้อมูล: {agencies.length ? agencies.join(' · ') : 'สำนักการระบายน้ำ กทม.'}</p>
+      {down.map(([label, v]) => (
+        <p key={label} className="text-xs text-muted">
+          แหล่งข้อมูลขัดข้อง: {label}
+          {v.lastSuccessAt ? ` — ดึงสำเร็จล่าสุด ${durationTh(minutesBetween(v.lastSuccessAt, new Date(nowMs)))}ที่แล้ว` : ''}
+        </p>
+      ))}
     </section>
   )
 }

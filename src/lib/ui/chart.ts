@@ -19,14 +19,24 @@ export function linearScale(domain: [number, number], range: [number, number]): 
   return f
 }
 
-/** Step of 1, 2, 2.5 or 5 × 10^k that yields roughly `count` intervals. */
+/** Step of 1, 2 or 5 × 10^k that yields roughly `count` intervals. */
 export function niceStep(span: number, count: number): number {
   if (!(span > 0) || !(count > 0)) return 1
   const raw = span / count
   const pow = 10 ** Math.floor(Math.log10(raw))
   const m = raw / pow
-  const nice = m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10
-  return nice * pow
+  // Same error thresholds as d3-array's tickIncrement (√50, √10, √2).
+  const nice = m >= 7.0710678 ? 10 : m >= 3.1622777 ? 5 : m >= 1.4142136 ? 2 : 1
+  return Number((nice * pow).toPrecision(12))
+}
+
+/** Decimals needed to print every multiple of `step` exactly (0.2 → 1, 0.05 → 2, 5 → 0). */
+export function stepDecimals(step: number): number {
+  if (!(step > 0) || !Number.isFinite(step)) return 0
+  for (let d = 0; d <= 6; d++) {
+    if (Math.abs(Math.round(step * 10 ** d) - step * 10 ** d) < 1e-6) return d
+  }
+  return 6
 }
 
 function roundTo(v: number, step: number): number {

@@ -1,5 +1,5 @@
 import type { Channel, Level } from '../types'
-import { SEND_TIMEOUT_MS, bodyWithLink, errorMessage, readErrorBody, titleLine, truncate } from './format'
+import { SEND_TIMEOUT_MS, bodyWithLink, errorMessage, readErrorBody, titleLine, truncate, truncateBytes } from './format'
 import type { ChannelSender, NotifyMessage, SendResult } from './types'
 
 // ntfy JSON publishing: POST {topic, title, message, ...} to the server root.
@@ -44,7 +44,8 @@ export const ntfySender: ChannelSender = {
     const payload: Record<string, unknown> = {
       topic: dest.topic,
       title: truncate(titleLine(msg), 250),
-      message: truncate(bodyWithLink(msg), 3500),
+      // ntfy turns messages over 4096 bytes into file attachments.
+      message: truncateBytes(bodyWithLink(msg), 3900),
       priority: PRIORITY[msg.level],
       tags: TAGS[msg.level],
     }

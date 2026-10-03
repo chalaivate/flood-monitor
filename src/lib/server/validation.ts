@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { isInThailand } from '../geo'
+import type { SourceId } from '../types'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN } from '../types'
 
 // Request schemas. Messages are Thai because the UI shows `{ error }` verbatim.
@@ -96,16 +97,19 @@ export type ChannelInput = z.infer<typeof ChannelInputSchema>
 
 // --- relay ingest payload -------------------------------------------------------
 
-const SOURCE_IDS = [
-  'bma-canal',
-  'bma-pump',
-  'bma-roadflood',
-  'bma-rain',
-  'thaiwater-canal',
-  'thaiwater-wl',
-  'thaiwater-rain',
-  'popnix',
-] as const
+// Record<SourceId, …> makes the compiler flag this list whenever a source is added.
+const SOURCE_ID_SET: Record<SourceId, true> = {
+  'bma-canal': true,
+  'bma-pump': true,
+  'bma-roadflood': true,
+  'bma-rain': true,
+  'thaiwater-canal': true,
+  'thaiwater-wl': true,
+  'thaiwater-rain': true,
+  'thaiwater-road': true,
+  popnix: true,
+}
+const SOURCE_IDS = Object.keys(SOURCE_ID_SET) as [SourceId, ...SourceId[]]
 
 const optNum = z.number().finite().nullable().optional()
 const optStr = (max: number) => z.string().max(max).nullable().optional()

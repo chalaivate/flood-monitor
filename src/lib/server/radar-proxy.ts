@@ -1,14 +1,11 @@
+import { BMA_RADAR_SOURCES, isBmaRadarSite, type BmaRadarSite } from '../radar'
+
 // Server-side proxy for the BMA weather radar stills. weather.bangkok.go.th only
 // answers Thai IPs, so the image is fetched by our (Thai-hosted) server and cached
 // briefly; foreign viewers then still see it. Kept gentle: one upstream request per
 // site per 4 minutes, shared by all viewers, and failures are cached for a minute.
 
-export const BMA_RADAR_SITES = {
-  nongchok: 'http://weather.bangkok.go.th/FTPCustomer/radar/pics/radarh.jpg',
-  nongkhaem: 'http://weather.bangkok.go.th/FTPCustomer/radar/pics/nkradarh.jpg',
-} as const
-
-export type BmaRadarSite = keyof typeof BMA_RADAR_SITES
+export type { BmaRadarSite }
 
 export const RADAR_TTL_MS = 4 * 60_000
 export const RADAR_FAIL_TTL_MS = 60_000
@@ -17,9 +14,7 @@ export const RADAR_STALE_MAX_MS = 30 * 60_000
 export const RADAR_TIMEOUT_MS = 15_000
 const MAX_BYTES = 8 * 1024 * 1024
 
-export function isRadarSite(v: string): v is BmaRadarSite {
-  return Object.hasOwn(BMA_RADAR_SITES, v)
-}
+export const isRadarSite = isBmaRadarSite
 
 /** JPEG files start with FF D8 FF. */
 export function isJpeg(bytes: Uint8Array): boolean {
@@ -48,7 +43,7 @@ export function clearRadarCache(): void {
 }
 
 async function download(site: BmaRadarSite, fetchImpl: typeof fetch): Promise<RadarImageData> {
-  const res = await fetchImpl(BMA_RADAR_SITES[site], {
+  const res = await fetchImpl(BMA_RADAR_SOURCES[site], {
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; flood-monitor/0.1; +radar proxy)',
       Accept: 'image/jpeg,image/*;q=0.8',

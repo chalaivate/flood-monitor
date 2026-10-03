@@ -29,7 +29,8 @@ export async function createStore(config: AppConfig): Promise<Store> {
     return new SupabaseStore({ url: config.SUPABASE_URL, serviceRoleKey: config.SUPABASE_SERVICE_ROLE_KEY })
   }
   const { SqliteStore } = await import('./sqlite')
-  return new SqliteStore(join(config.DATA_DIR, 'flood.db'))
+  // Demo data never mixes with real readings: DATA_MODE=fixture uses its own database file.
+  return new SqliteStore(join(config.DATA_DIR, config.DATA_MODE === 'fixture' ? 'flood-demo.db' : 'flood.db'))
 }
 
 /** The shared store for this process. */

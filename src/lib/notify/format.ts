@@ -46,6 +46,20 @@ export function plainText(msg: NotifyMessage, max = 4000): string {
   return `${title}\n\n${truncate(body, Math.max(1, room))}${link}`
 }
 
+/** Cut a string so its UTF-8 encoding fits in `maxBytes` (Thai is 3 bytes per character). */
+export function truncateBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const out: string[] = []
+  let used = 3 // the ellipsis
+  for (const ch of text) {
+    const b = Buffer.byteLength(ch, 'utf8')
+    if (used + b > maxBytes) break
+    out.push(ch)
+    used += b
+  }
+  return `${out.join('')}…`
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')

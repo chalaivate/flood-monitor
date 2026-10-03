@@ -28,7 +28,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const busy = useBusy()
   const theme = useTheme()
 
-  const chipLabel = !place ? 'กำลังโหลด…' : place.origin === 'default' ? 'ตั้งตำแหน่ง' : place.label
+  const chipLabel = !place ? 'กำลังโหลด…' : place.origin === 'default' ? 'ตั้งบ้าน' : place.label
   const chipTitle = place && place.origin !== 'default' ? `${place.label} · รัศมี ${place.radiusKm} กม. — แตะเพื่อเปลี่ยน` : 'ตั้งตำแหน่งบ้านของคุณ'
 
   return (

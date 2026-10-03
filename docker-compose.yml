@@ -1,0 +1,40 @@
+# Flood Monitor — all-in-one deployment for a machine in Thailand
+# (office PC, mini PC, NAS, Thai VPS). BMA data sources only answer Thai IPs.
+#
+#   cp .env.example .env        # then edit
+#   mkdir -p data && sudo chown 1000:1000 data   # the container runs as uid 1000
+#   docker compose up -d --build
+#   open http://localhost:3000
+#
+# Data (SQLite) lives in ./data. Back it up by copying the folder while the
+# container is stopped, or with `sqlite3 data/flood.db ".backup backup.db"`.
+
+services:
+  app:
+    build: .
+    image: flood-monitor:latest
+    container_name: flood-monitor
+    env_file: .env
+    environment:
+      STORE: sqlite
+      DATA_DIR: /app/data
+      EMBEDDED_WORKER: "1"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # Optional: publish the dashboard on the internet without opening ports, via
+  # Cloudflare Tunnel. Create a tunnel in the Cloudflare Zero Trust dashboard,
+  # point its public hostname to http://app:3000, put the token in .env as
+  # CLOUDFLARE_TUNNEL_TOKEN, set PUBLIC_BASE_URL to that hostname, then uncomment.
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - app
+  #   restart: unless-stopped

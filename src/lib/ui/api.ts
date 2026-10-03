@@ -1,16 +1,9 @@
-import type {
-  AlertEvent,
-  Channel,
-  ChannelType,
-  HistoryPoint,
-  Level,
-  Place,
-  SourceId,
-  StationKind,
-} from '../types'
+import type { ChannelLink, MapStation, PublicChannel, PublicPlace } from '../server/public'
+import type { AlertEvent, ChannelType, HistoryPoint, Place } from '../types'
 
-// Client-side view of the HTTP API (docs/DESIGN.md §5). Types mirror the server
-// contract; the UI never imports server modules.
+// Client-side view of the HTTP API (docs/DESIGN.md §5). Response shapes come from
+// src/lib/server/public.ts as type-only imports (that module is client-safe); the UI
+// never imports server runtime code.
 
 export type DataMode = 'live' | 'fixture'
 
@@ -24,26 +17,7 @@ export interface PublicConfig {
   vapidPublicKey: string | null
 }
 
-export interface MapStation {
-  id: string
-  kind: StationKind
-  source: SourceId
-  name: string
-  shortName?: string | null
-  district?: string | null
-  lat: number
-  lng: number
-  level: Level
-  stale: boolean
-  observedAt: string | null
-  waterLevel?: number | null
-  bankLevel?: number | null
-  freeboard?: number | null
-  rain24h?: number | null
-  rain1h?: number | null
-  roadFloodCm?: number | null
-  officialStatus?: string | null
-}
+export type { ChannelLink, MapStation, PublicChannel, PublicPlace }
 
 export interface StationsResponse {
   generatedAt: string
@@ -53,9 +27,6 @@ export interface StationsResponse {
 export interface HistoryResponse {
   series: Record<string, HistoryPoint[]>
 }
-
-export type PublicPlace = Omit<Place, 'manageTokenHash'>
-export type PublicChannel = Omit<Channel, 'linkCode'> & { linkCode?: string | null }
 
 export interface PlaceInput {
   label: string
@@ -67,12 +38,6 @@ export interface PlaceInput {
   rain?: Place['rain']
   rapidRiseCm?: number
   notifyMinLevel?: Place['notifyMinLevel']
-}
-
-export interface ChannelLink {
-  code: string
-  url?: string | null
-  instructions?: string | null
 }
 
 export interface CreateChannelResponse {
@@ -150,7 +115,7 @@ export const api = {
   createPlace: (input: PlaceInput) =>
     apiFetch<{ place: PublicPlace; manageToken: string }>('/api/places', { method: 'POST', body: input }),
   getPlace: (id: string, token: string) =>
-    apiFetch<{ place: PublicPlace } | PublicPlace>(`/api/places/${encodeURIComponent(id)}`, { token }).then(unwrapPlace),
+    apiFetch<{ place: PublicPlace; channels?: PublicChannel[] }>(`/api/places/${encodeURIComponent(id)}`, { token }),
   updatePlace: (id: string, token: string, patch: Partial<PlaceInput>) =>
     apiFetch<{ place: PublicPlace } | PublicPlace>(`/api/places/${encodeURIComponent(id)}`, { method: 'PATCH', token, body: patch }).then(
       unwrapPlace,
@@ -165,7 +130,8 @@ export const api = {
     apiFetch<CreateChannelResponse>(`/api/places/${encodeURIComponent(id)}/channels`, { method: 'POST', token, body }),
   deleteChannel: (id: string, token: string, channelId: string) =>
     apiFetch<unknown>(`/api/places/${encodeURIComponent(id)}/channels/${encodeURIComponent(channelId)}`, { method: 'DELETE', token }),
-  test: (id: string, token: string) => apiFetch<TestResponse>(`/api/places/${encodeURIComponent(id)}/test`, { method: 'POST', token }),
+  test: (id: string, token: string, channelId?: string) =>
+    apiFetch<TestResponse>(`/api/places/${encodeURIComponent(id)}/test`, { method: 'POST', token, body: channelId ? { channelId } : {} }),
   events: (id: string, token: string, limit = 50) =>
     apiFetch<{ events: AlertEvent[] }>(`/api/places/${encodeURIComponent(id)}/events?limit=${limit}`, { token }).then((r) => r?.events ?? []),
 }

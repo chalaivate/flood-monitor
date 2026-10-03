@@ -9,6 +9,7 @@ import {
   linePath,
   linearScale,
   niceTicks,
+  stepDecimals,
   seriesPoints,
   timeTicks,
   timeTickStep,
@@ -29,7 +30,8 @@ export const SERIES_COLORS = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)'
 const MAX_SERIES = SERIES_COLORS.length
 
 const HEIGHT = 248
-const M = { top: 14, right: 10, bottom: 26, left: 38 }
+/** Right gutter holds the threshold keys (shape + value) so they never sit on the lines. */
+const M = { top: 22, right: 44, bottom: 26, left: 36 }
 
 interface Series {
   id: string
@@ -83,15 +85,21 @@ export function HistoryChart({ water, series, thresholds, nowMs, hours = 48, err
       className="fm-btn fm-btn-quiet"
       onClick={() => setView((v) => (v === 'chart' ? 'table' : 'chart'))}
       aria-pressed={view === 'table'}
+      aria-label={view === 'chart' ? 'ดูเป็นตาราง' : 'ดูเป็นกราฟ'}
       disabled={!hasData}
     >
       {view === 'chart' ? <IconTable size={18} /> : <IconChart size={18} />}
-      {view === 'chart' ? 'ดูเป็นตาราง' : 'ดูเป็นกราฟ'}
+      <span className="hidden sm:inline">{view === 'chart' ? 'ดูเป็นตาราง' : 'ดูเป็นกราฟ'}</span>
     </button>
   )
 
   return (
-    <Card title={`ระยะห่างตลิ่ง ${hours} ชม. (ม.)`} action={toggle} id={`${uid}-hist`}>
+    <Card
+      title={`ระยะห่างตลิ่ง ${hours} ชม. (ม.)`}
+      subtitle={<ThresholdKey thresholds={thresholds} />}
+      action={toggle}
+      id={`${uid}-hist`}
+    >
       {water.length === 0 ? (
         <EmptyState title="ไม่มีจุดวัดระดับน้ำให้แสดง">ขยายรัศมีค้นหาเพื่อดูกราฟย้อนหลัง</EmptyState>
       ) : series === null && !error ? (
@@ -129,7 +137,8 @@ function Plot({ list, thresholds, t0, t1 }: { list: Series[]; thresholds: Freebo
   const w = Math.max(width, 240)
   const x = linearScale([t0, t1], [M.left, w - M.right])
   const y = linearScale([y0, y1], [HEIGHT - M.bottom, M.top])
-  const yTicks = niceTicks(y0, y1, HEIGHT > 200 ? 5 : 4)
+  const yTicks = niceTicks(y0, y1, 4)
+  const yDec = yTicks.length > 1 ? stepDecimals(Math.abs(yTicks[1]! - yTicks[0]!)) : 1
   const xTicks = timeTicks(t0, t1, timeTickStep(t1 - t0, w - M.left - M.right))
   const times = unionTimes(list.map((s) => s.points))
 
@@ -207,7 +216,7 @@ function Plot({ list, thresholds, t0, t1 }: { list: Series[]; thresholds: Freebo
             <g key={`y${v}`}>
               <line x1={M.left} x2={w - M.right} y1={y(v)} y2={y(v)} stroke="var(--grid)" strokeWidth={1} shapeRendering="crispEdges" />
               <text x={M.left - 6} y={y(v)} dy="0.32em" textAnchor="end" fontSize={11} fill="var(--muted)" className="tabular">
-                {v.toFixed(1)}
+                {v.toFixed(Math.max(1, yDec))}
               </text>
             </g>
           ))}
@@ -257,12 +266,13 @@ function Plot({ list, thresholds, t0, t1 }: { list: Series[]; thresholds: Freebo
                 strokeDasharray="4 3"
                 shapeRendering="crispEdges"
               />
-              <g transform={`translate(${w - M.right - 2} ${y(l.v) - 13})`}>
-                <g transform="translate(-10 1) scale(0.8)">
+              <g transform={`translate(${w - M.right + 5} ${y(l.v)})`}>
+                <title>{`${levelLabel(l.level)} ต่ำกว่า ${l.v.toFixed(2)} ม.`}</title>
+                <g transform="translate(0 -4.5) scale(0.75)">
                   <LevelShape level={l.level} color={LEVEL_COLOR[l.level]} />
                 </g>
-                <text x={-14} y={9} textAnchor="end" fontSize={10.5} fill="var(--text-2)" className="fm-halo">
-                  {levelLabel(l.level)} {l.v.toFixed(2)}
+                <text x={12} dy="0.32em" fontSize={10.5} fill="var(--text-2)" className="tabular">
+                  {l.v.toFixed(2)}
                 </text>
               </g>
             </g>
@@ -296,7 +306,7 @@ function Plot({ list, thresholds, t0, t1 }: { list: Series[]; thresholds: Freebo
               ))}
             </g>
           )}
-          <text x={M.left - 6} y={M.top - 4} textAnchor="end" fontSize={10.5} fill="var(--muted)">
+          <text x={M.left - 6} y={10} textAnchor="end" fontSize={10.5} fill="var(--muted)">
             ม.
           </text>
         </svg>
@@ -322,6 +332,26 @@ function Plot({ list, thresholds, t0, t1 }: { list: Series[]; thresholds: Freebo
         </div>
       )}
     </div>
+  )
+}
+
+/** Explains the dashed reference lines (shape + Thai label; colour is secondary). */
+function ThresholdKey({ thresholds }: { thresholds: FreeboardThresholds }) {
+  const items = [
+    { level: 'watch', v: thresholds.watch },
+    { level: 'warning', v: thresholds.warning },
+    { level: 'critical', v: thresholds.critical },
+  ] as const
+  return (
+    <span className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-muted">
+      <span>เส้นประ = เกณฑ์</span>
+      {items.map((i) => (
+        <span key={i.level} className="inline-flex items-center gap-1">
+          <LevelDot level={i.level} size={9} decorative />
+          {levelLabel(i.level)} {i.v.toFixed(2)}
+        </span>
+      ))}
+    </span>
   )
 }
 

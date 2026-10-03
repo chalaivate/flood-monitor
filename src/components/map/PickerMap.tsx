@@ -19,12 +19,15 @@ export default function PickerMap({
   lng,
   radiusKm,
   stations,
+  hasPoint = true,
   onPick,
 }: {
   lat: number
   lng: number
   radiusKm: number
   stations: MapStation[]
+  /** false until the user chose a point (the map is then only centred on the default). */
+  hasPoint?: boolean
   onPick: (lat: number, lng: number) => void
 }) {
   const water = stations.filter((s) => s.kind === 'canal' || s.kind === 'river')
@@ -34,12 +37,14 @@ export default function PickerMap({
       <SizeFix />
       <Recenter lat={lat} lng={lng} onlyIfOutside />
       <ClickToPick onPick={onPick} />
-      <Circle
-        center={[lat, lng]}
-        radius={radiusKm * 1000}
-        pathOptions={{ color: 'var(--accent)', weight: 1.5, fillColor: 'var(--accent)', fillOpacity: 0.08 }}
-        interactive={false}
-      />
+      {hasPoint && (
+        <Circle
+          center={[lat, lng]}
+          radius={radiusKm * 1000}
+          pathOptions={{ color: 'var(--accent)', weight: 1.5, fillColor: 'var(--accent)', fillOpacity: 0.08 }}
+          interactive={false}
+        />
+      )}
       {water.map((s) => (
         <CircleMarker
           key={s.id}
@@ -52,7 +57,7 @@ export default function PickerMap({
           </Tooltip>
         </CircleMarker>
       ))}
-      <Marker position={[lat, lng]} icon={homeMarkerIcon()} interactive={false} keyboard={false} />
+      {hasPoint && <Marker position={[lat, lng]} icon={homeMarkerIcon()} interactive={false} keyboard={false} />}
     </MapContainer>
   )
 }
