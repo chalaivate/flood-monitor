@@ -1,0 +1,122 @@
+// Standalone poller.
+//
+//   npm run worker                      loop every POLL_MINUTES: fetch → store → alerts → prune
+//   npm run worker:once                 one cycle, then exit (exit 1 when every source failed)
+//   npm run worker -- --relay <baseUrl> fetch only the Thai-IP-only sources and POST them to
+//                                       <baseUrl>/api/ingest (Bearer INGEST_TOKEN); no local store
+//   (--once combines with --relay)
+//
+// Reads .env from the working directory when present (real env vars win).
+
+import { existsSync } from 'node:fs'
+import { loadConfig } from '../src/lib/config'
+import { getSenders } from '../src/lib/notify'
+import { log } from '../src/lib/server/log'
+import { runPollCycle, runRelayCycle, startLoop, summarize, type LoopHandle } from '../src/lib/server/poller'
+import { getSources } from '../src/lib/sources'
+import { getStore } from '../src/lib/store'
+
+interface Args {
+  once: boolean
+  relay: string | null
+}
+
+function parseArgs(argv: string[]): Args {
+  const args: Args = { once: false, relay: null }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!
+    if (a === '--once') args.once = true
+    else if (a === '--relay') args.relay = argv[++i] ?? ''
+    else if (a.startsWith('--relay=')) args.relay = a.slice('--relay='.length)
+    else if (a === '--help' || a === '-h') {
+      console.log('usage: tsx worker/poll.ts [--once] [--relay <baseUrl>]')
+      process.exit(0)
+    } else {
+      console.error(`unknown argument: ${a}`)
+      process.exit(2)
+    }
+  }
+  return args
+}
+
+async function main(): Promise<void> {
+  if (existsSync('.env')) process.loadEnvFile('.env')
+  const args = parseArgs(process.argv.slice(2))
+  const config = loadConfig()
+  const fetchImpl: typeof fetch = (input, init) => globalThis.fetch(input, init)
+  const intervalMs = Math.max(1, config.POLL_MINUTES) * 60_000
+
+  let cycle: () => Promise<boolean> // resolves true when the cycle was a total failure
+
+  if (args.relay !== null) {
+    let base: URL
+    try {
+      base = new URL(args.relay)
+      if (base.protocol !== 'https:' && base.protocol !== 'http:') throw new Error('protocol')
+    } catch {
+      console.error('--relay needs a base URL, e.g. --relay https://flood.example.org')
+      process.exit(2)
+    }
+    if (!config.INGEST_TOKEN) {
+      console.error('relay mode needs INGEST_TOKEN (same value as on the receiving server)')
+      process.exit(2)
+    }
+    const sources = getSources(config).filter((s) => s.thaiIpOnly)
+    if (sources.length === 0) {
+      console.error('relay mode: no Thai-IP-only source is enabled (check SOURCES / DATA_MODE)')
+      process.exit(2)
+    }
+    log(`[relay] relaying ${sources.map((s) => s.id).join(', ')} → ${base.origin}/api/ingest every ${config.POLL_MINUTES} min`)
+    cycle = async () => {
+      const s = await runRelayCycle({ baseUrl: base.toString(), token: config.INGEST_TOKEN!, config, sources, fetch: fetchImpl, log })
+      return s.allFailed
+    }
+  } else {
+    const store = await getStore()
+    const sources = getSources(config)
+    const deps = { store, config, sources, senders: getSenders(), fetch: fetchImpl, log }
+    log(
+      `[worker] sources: ${sources.map((s) => s.id).join(', ') || '(none)'}; store=${config.STORE}; ` +
+        `alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}; data=${config.DATA_MODE}; every ${config.POLL_MINUTES} min`,
+    )
+    cycle = async () => {
+      const s = await runPollCycle(deps)
+      log(summarize(s))
+      return s.allFailed
+    }
+  }
+
+  if (args.once) {
+    const allFailed = await cycle()
+    process.exitCode = allFailed ? 1 : 0
+    return
+  }
+
+  const loop: LoopHandle = startLoop(
+    async () => {
+      await cycle()
+    },
+    { intervalMs, log },
+  )
+  let stopping = false
+  const shutdown = (signal: string) => {
+    if (stopping) {
+      log(`[worker] ${signal} again, exiting now`)
+      process.exit(130)
+    }
+    stopping = true
+    log(`[worker] ${signal} received, finishing current cycle…`)
+    void loop.stop().then(() => {
+      log('[worker] stopped')
+      process.exit(0)
+    })
+  }
+  process.on('SIGINT', () => shutdown('SIGINT'))
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  await loop.done
+}
+
+main().catch((err: unknown) => {
+  log(`[worker] fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
+  process.exit(1)
+})
