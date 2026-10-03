@@ -809,6 +809,7 @@ describe('public read endpoints', () => {
       telegramBot: 'flood_bot',
       lineAddFriendUrl: 'https://lin.ee/abcdef',
       vapidPublicKey: null,
+      rainviewer: true,
     })
     expect(JSON.stringify(b)).not.toMatch(/secret|line-token|re_test/)
   })
