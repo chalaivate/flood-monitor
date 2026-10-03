@@ -39,7 +39,8 @@ export function LegendCard({ snapshot, nowMs }: { snapshot: DashboardSnapshot; n
           <LevelDot level="unknown" size={11} decorative /> ไม่มีข้อมูล
         </li>
       </ul>
-      <p className="mt-1.5 text-xs text-muted">ข้อมูล: {agencies.length ? agencies.join(' · ') : 'สำนักการระบายน้ำ กทม.'}</p>
+      {/* Attribute only the agencies whose data is on screen (none outside coverage). */}
+      {agencies.length > 0 && <p className="mt-1.5 text-xs text-muted">ข้อมูล: {agencies.join(' · ')}</p>}
       {down.map(([label, v]) => (
         <p key={label} className="text-xs text-muted">
           แหล่งข้อมูลขัดข้อง: {label}

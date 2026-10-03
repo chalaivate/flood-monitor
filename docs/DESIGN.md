@@ -147,18 +147,22 @@ budget is spent or the provider fails, the last good value up to 60 min old is s
 
 Dark by default (HA-like), light theme toggle (`data-theme` on `<html>`, key `fm-theme`).
 Tokens in `src/app/globals.css` (`--card`, `--text`, `--lv-*` status colours, `--s1..s6` series).
+`--muted` stays ≥ 4.5:1 on every surface (a test computes the ratios from globals.css); filled buttons use
+`--accent-fill` with white text; accent-coloured text uses `--accent-text`; `--accent` is only for lines,
+borders and focus rings (≥ 3:1).
 Status colour is **never alone**: always `LevelDot` (shape differs by level) and/or Thai label.
 
 Routes:
 - `/` dashboard for the current place (URL `?place=` | `?lat&lng&label` | localStorage `fm-place` | default).
-  Desktop 3 columns, mobile 1 column:
-  - Col 1: **สถานการณ์ตอนนี้** (overall `LevelBadge` large + bullet lines + "ตรวจล่าสุด dd/MM HH:mm · อัปเดตทุก N นาที"),
-    **เรดาร์ฝน** card (RainViewer animated mini-map; BMA Nong Chok / Nong Khaem image tabs when available).
-  - Col 2: 2×2 **gauge cards** (freeboard of nearest stations, `Gauge` component, label = shortName,
-    trend arrow + age under it), **อากาศที่บ้านตอนนี้** (condition, rain chance next 3 h, rain rate, humidity, temperature).
-  - Col 3: legend card ("เข็ม = ระยะจากผิวน้ำถึงขอบตลิ่ง (เมตร) · เฝ้าระวัง < 0.60 · เตือนภัย < 0.30 · วิกฤต < 0.10 · ข้อมูล: …"),
-    **ระยะห่างตลิ่ง 48 ชม. (ม.)** multi-line chart (crosshair tooltip, legend with latest values, threshold lines, table view toggle),
-    **ฝนสะสม 24 ชม. รอบบ้าน** gauge (0–150 mm, TMD bands), road-flood list when any.
+  Cards are in the DOM in phone priority order — **สถานการณ์ตอนนี้**, 2×2 **gauge cards** (freeboard, trend, age),
+  **ระยะห่างตลิ่ง 48 ชม. (ม.)** chart (crosshair tooltip, threshold lines, table view), **ฝนสะสม 24 ชม. รอบบ้าน**
+  (0–150 mm, TMD bands), road-flood list (when any), **อากาศที่บ้านตอนนี้**, **เรดาร์ฝน** (RainViewer + BMA
+  Nong Chok / Nong Khaem / forecast image tabs; ARIA tablist, forecast images never labelled "ตอนนี้"), legend.
+  Wider screens place them with `.fm-dash` grid-template-areas (never `order` / `display: contents`), so focus
+  order follows reading order. Desktop: top row situation · gauges · history; weather under the gauges; rain and
+  road flood under the situation; radar under the history; legend full width. Tablet reads row by row in DOM order.
+  - Out of coverage (`snapshot.coverage.nearestWaterKm` beyond the radius): "สถานีวัดน้ำที่ใกล้ที่สุดอยู่ห่าง X กม. —
+    อยู่นอกพื้นที่ครอบคลุม" with "เลือกตำแหน่งอื่น"; within reach: "ขยายรัศมีเป็น N กม."; no recent data anywhere: says so.
   - Banners: demo-data banner (`dataMode = fixture`), stale-data banner (lastIngestAt older than 3× poll),
     "set your location" prompt when using the default place.
   - Auto-refresh every 60 s; manual refresh button.
@@ -167,6 +171,9 @@ Routes:
 - `/alerts` set up alerts: place form (label, location picker, radius, thresholds, min level),
   channel cards (Web Push on this device, LINE, Telegram, ntfy, Email, Discord) with clear Thai
   instructions, test button, alert history. Stores `{placeId, manageToken}` in localStorage `fm-place`.
+  LINE/Telegram link codes show "รหัสใช้ได้ถึง HH:mm น." and, once expired, "รหัสหมดอายุ" + "ขอรหัสใหม่".
+  On a non-secure origin (`!isSecureContext`) Web Push and "ใช้ตำแหน่งปัจจุบัน" explain that HTTPS is required.
+  Channels the server does not offer are hidden (e-mail) or greyed out.
 - `/about` data sources & attribution, how to read freeboard, disclaimer ("ไม่ใช่ประกาศทางการ —
   ติดตามประกาศ กทม. สายด่วน 1555 / @BKK_BEST, กรมอุตุนิยมวิทยา, ปภ. 1784").
 

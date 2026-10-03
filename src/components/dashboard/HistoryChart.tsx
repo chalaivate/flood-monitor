@@ -53,9 +53,11 @@ export interface HistoryChartProps {
   error?: string | null
   /** Previous data while a new place loads: keep the frame, dim it. */
   dimmed?: boolean
+  /** Advice when no water station is tracked (radius too small vs outside coverage). */
+  emptyHint?: string
 }
 
-export function HistoryChart({ water, series, thresholds, nowMs, hours = 48, error, dimmed }: HistoryChartProps) {
+export function HistoryChart({ water, series, thresholds, nowMs, hours = 48, error, dimmed, emptyHint }: HistoryChartProps) {
   const [view, setView] = useState<'chart' | 'table'>('chart')
   const uid = useId()
 
@@ -101,7 +103,7 @@ export function HistoryChart({ water, series, thresholds, nowMs, hours = 48, err
       id={`${uid}-hist`}
     >
       {water.length === 0 ? (
-        <EmptyState title="ไม่มีจุดวัดระดับน้ำให้แสดง">ขยายรัศมีค้นหาเพื่อดูกราฟย้อนหลัง</EmptyState>
+        <EmptyState title="ไม่มีจุดวัดระดับน้ำให้แสดง">{emptyHint ?? 'ขยายรัศมีค้นหาเพื่อดูกราฟย้อนหลัง'}</EmptyState>
       ) : series === null && !error ? (
         <div className="grid place-items-center text-sm text-muted" style={{ height: HEIGHT }}>
           กำลังโหลดข้อมูลย้อนหลัง…
@@ -382,7 +384,8 @@ function HistoryTable({ list }: { list: Series[] }) {
         <caption className="sr-only">ระยะห่างตลิ่ง (เมตร) ค่าล่าสุดของแต่ละชั่วโมง เวลาประเทศไทย</caption>
         <thead>
           <tr>
-            <th scope="col" className="text-left">
+            {/* Pinned corner: sticky top (via .fm-table) and left, above the pinned row headers. */}
+            <th scope="col" className="left-0 z-[1] text-left">
               เวลา
             </th>
             {list.map((s) => (
@@ -395,7 +398,7 @@ function HistoryTable({ list }: { list: Series[] }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.t}>
-              <th scope="row" className="tabular text-left font-normal text-text-2">
+              <th scope="row" className="tabular sticky left-0 bg-card text-left font-normal whitespace-nowrap text-text-2">
                 {bkkShort(r.t)}
               </th>
               {r.values.map((v, i) => (

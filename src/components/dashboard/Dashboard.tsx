@@ -5,6 +5,7 @@ import type { DashboardSnapshot, HistoryPoint } from '@/lib/types'
 import { LEVEL_ORDER } from '@/lib/types'
 import type { DataMode } from '@/lib/ui/api'
 import { bkkTime } from '@/lib/ui/chart'
+import { coverageHintTh, waterCoverage } from '@/lib/ui/coverage'
 import { openLocationDialog } from '@/lib/ui/dialog'
 import { durationTh, frozenSources, isIngestStale } from '@/lib/ui/format'
 import { sourceLabel } from '@/lib/ui/levels'
@@ -34,7 +35,7 @@ export interface DashboardProps {
   toolbar?: ReactNode
 }
 
-/** HA-style dashboard: 3 columns on desktop, 2 on tablets, 1 on phones (priority order). */
+/** HA-style dashboard: 3 columns on desktop, 2 on tablets, 1 on phones (priority order, see .fm-dash). */
 export function Dashboard({ snapshot, place, dataMode, nowMs, history, status, onRetry, toolbar }: DashboardProps) {
   const label = snapshot?.place.label ?? place?.label ?? ''
   return (
@@ -248,39 +249,44 @@ function Grid({
   dimmed: boolean
 }) {
   const p = snapshot.place
+  const hasRoad = snapshot.roadFlood.length > 0
+  const water = waterCoverage(snapshot)
+  // Cards in phone priority order; .fm-dash (globals.css) places them on wider screens
+  // without reordering, so DOM, visual and focus order stay the same.
   return (
-    <div className={`flex flex-col gap-3 md:grid md:grid-cols-2 md:items-start lg:grid-cols-3 ${dimmed ? 'opacity-60' : ''} transition-opacity`}>
-      <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-3">
-        <div className="order-1 min-w-0 lg:order-none">
-          <SituationCard snapshot={snapshot} />
-        </div>
-        <div className="order-6 min-w-0 lg:order-none">
-          <RadarCard lat={p.lat} lng={p.lng} radiusKm={p.radiusKm} images={snapshot.radar} nowMs={nowMs} />
-        </div>
+    <div className={`fm-dash ${dimmed ? 'opacity-60' : ''} transition-opacity`} data-road={hasRoad ? '1' : '0'}>
+      <div data-area="sit">
+        <SituationCard snapshot={snapshot} />
       </div>
-      <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-3">
-        <div className="order-2 min-w-0 lg:order-none">
-          <GaugeGrid snapshot={snapshot} nowMs={nowMs} />
-        </div>
-        <div className="order-5 min-w-0 lg:order-none">
-          <WeatherCard weather={snapshot.weather} nowMs={nowMs} />
-        </div>
+      <div data-area="gauge">
+        <GaugeGrid snapshot={snapshot} nowMs={nowMs} />
       </div>
-      <div className="contents lg:flex lg:min-w-0 lg:flex-col lg:gap-3">
-        <div className="order-7 min-w-0 lg:order-none">
-          <LegendCard snapshot={snapshot} nowMs={nowMs} />
+      <div data-area="history">
+        <HistoryChart
+          water={snapshot.water}
+          series={history.data}
+          error={history.error}
+          thresholds={p.freeboard}
+          nowMs={nowMs}
+          emptyHint={coverageHintTh(water)}
+        />
+      </div>
+      <div data-area="rain">
+        <RainGaugeCard snapshot={snapshot} />
+      </div>
+      {hasRoad && (
+        <div data-area="road">
+          <RoadFloodCard items={snapshot.roadFlood} nowMs={nowMs} />
         </div>
-        <div className="order-3 min-w-0 lg:order-none">
-          <HistoryChart water={snapshot.water} series={history.data} error={history.error} thresholds={p.freeboard} nowMs={nowMs} />
-        </div>
-        <div className="order-4 min-w-0 lg:order-none">
-          <RainGaugeCard snapshot={snapshot} />
-        </div>
-        {snapshot.roadFlood.length > 0 && (
-          <div className="order-4 min-w-0 lg:order-none">
-            <RoadFloodCard items={snapshot.roadFlood} nowMs={nowMs} />
-          </div>
-        )}
+      )}
+      <div data-area="weather">
+        <WeatherCard weather={snapshot.weather} nowMs={nowMs} />
+      </div>
+      <div data-area="radar">
+        <RadarCard lat={p.lat} lng={p.lng} radiusKm={p.radiusKm} images={snapshot.radar} nowMs={nowMs} />
+      </div>
+      <div data-area="legend">
+        <LegendCard snapshot={snapshot} nowMs={nowMs} />
       </div>
     </div>
   )

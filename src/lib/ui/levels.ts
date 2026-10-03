@@ -46,7 +46,6 @@ export const SOURCE_LABEL_TH: Record<SourceId, string> = {
   'thaiwater-wl': 'สสน. (ThaiWater)',
   'thaiwater-rain': 'สสน. (ThaiWater)',
   'thaiwater-road': 'สสน. (ThaiWater)',
-  popnix: 'flood.pop.in.th',
 }
 
 export function sourceLabel(source: string): string {

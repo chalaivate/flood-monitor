@@ -11,6 +11,14 @@ import { LEVEL_ORDER } from '@/lib/types'
 import { BaseTiles, SizeFix, homeMarkerIcon, levelIcon } from './leaflet-bits'
 import { StationPopup } from './StationPopup'
 
+/** Pixels of the map covered by page UI (the filter panel / bottom sheet, map controls). */
+export interface MapInsets {
+  top: number
+  right: number
+  bottom: number
+  left: number
+}
+
 export interface StationsMapProps {
   stations: MapStation[]
   center: { lat: number; lng: number }
@@ -19,6 +27,38 @@ export interface StationsMapProps {
   selectedId: string | null
   nowMs: number
   onSetHome: (lat: number, lng: number) => void
+  /** Where the attribution goes; it must stay visible (OSM tile policy), so not under the sheet. */
+  attributionPosition?: L.ControlPosition
+  /** Popups auto-pan so they open inside these insets (clear of the panel and the zoom control). */
+  insets?: MapInsets
+}
+
+const DEFAULT_INSETS: MapInsets = { top: 80, right: 16, bottom: 16, left: 16 }
+
+/** Keeps the attribution visible and makes every popup pan clear of the overlaid UI. */
+function MapChrome({ attributionPosition, insets }: { attributionPosition: L.ControlPosition; insets: MapInsets }) {
+  const map = useMap()
+  const insetsRef = useRef(insets)
+  useEffect(() => {
+    insetsRef.current = insets
+  }, [insets])
+  useEffect(() => {
+    map.attributionControl?.setPosition(attributionPosition)
+  }, [map, attributionPosition])
+  useEffect(() => {
+    // Runs before react-leaflet lays the popup out (its update() reads these options), so
+    // the first auto-pan already uses the current insets.
+    const onOpen = (e: L.PopupEvent) => {
+      const i = insetsRef.current
+      e.popup.options.autoPanPaddingTopLeft = [i.left, i.top]
+      e.popup.options.autoPanPaddingBottomRight = [i.right, i.bottom]
+    }
+    map.on('popupopen', onOpen)
+    return () => {
+      map.off('popupopen', onOpen)
+    }
+  }, [map])
+  return null
 }
 
 function PickPoint({ onPick }: { onPick: (p: { lat: number; lng: number }) => void }) {
@@ -41,7 +81,17 @@ function FocusStation({ id, stations, markers }: { id: string | null; stations: 
 }
 
 /** Full-height station map: level-shaped markers, home + radius, optional rain radar. */
-export default function StationsMap({ stations, center, home, radarUrl, selectedId, nowMs, onSetHome }: StationsMapProps) {
+export default function StationsMap({
+  stations,
+  center,
+  home,
+  radarUrl,
+  selectedId,
+  nowMs,
+  onSetHome,
+  attributionPosition = 'bottomright',
+  insets = DEFAULT_INSETS,
+}: StationsMapProps) {
   const markers = useRef(new Map<string, L.Marker>())
   const [picked, setPicked] = useState<{ lat: number; lng: number } | null>(null)
   // Draw severe stations last so they sit on top of normal ones.
@@ -51,6 +101,7 @@ export default function StationsMap({ stations, center, home, radarUrl, selected
     <MapContainer center={[center.lat, center.lng]} zoom={13} minZoom={5} maxZoom={18} className="h-full w-full" zoomControl>
       <BaseTiles />
       <SizeFix />
+      <MapChrome attributionPosition={attributionPosition} insets={insets} />
       {radarUrl && (
         <TileLayer
           url={radarUrl}

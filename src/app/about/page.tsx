@@ -65,42 +65,105 @@ function Section({ id, title, children }: { id: string; title: string; children:
   )
 }
 
+/** Coordinates of one layout of the freeboard diagram (user units of its viewBox). */
+interface DiagramLayout {
+  id: string
+  width: number
+  height: number
+  /** Ground outline: left bank top, channel bottom, right (lower) bank top. */
+  ground: string
+  water: { path: string; y: number; x1: number; x2: number }
+  /** Dashed line at the lower bank's height. */
+  bank: { y: number; x1: number; x2: number }
+  /** Freeboard arrow (x, from bank height down to the water surface). */
+  arrowX: number
+  /** Optional dashed extension of the water level to the arrow. */
+  waterExt?: { x1: number; x2: number }
+  font: number
+  labels: { x: number; y: number; text: string; anchor?: 'start' | 'end'; strong?: boolean }[]
+  className: string
+}
+
+// The wide layout is unreadable when scaled to a phone (labels ~7px), so phones get a
+// narrower drawing with the same labels; both keep labels >= 12 CSS px at their smallest
+// size (wide: 536px at the sm breakpoint; narrow: 280px on a 360px screen).
+const DIAGRAMS: DiagramLayout[] = [
+  {
+    id: 'fb-narrow',
+    width: 320,
+    height: 228,
+    ground: 'M0 64 H56 L96 200 H226 L262 92 H320',
+    water: { path: 'M73.6 124 H251.3 L226 200 H96 Z', y: 124, x1: 73.6, x2: 251.3 },
+    bank: { y: 92, x1: 188, x2: 320 },
+    arrowX: 200,
+    font: 14,
+    labels: [
+      { x: 4, y: 52, text: 'ตลิ่งฝั่งซ้าย' },
+      { x: 316, y: 62, text: 'ตลิ่งฝั่งขวา', anchor: 'end' },
+      { x: 316, y: 82, text: '(ต่ำกว่า)', anchor: 'end' },
+      { x: 192, y: 113, text: 'ระยะห่างตลิ่ง', anchor: 'end', strong: true },
+      { x: 104, y: 148, text: 'ผิวน้ำ (ระดับน้ำ)', strong: true },
+      { x: 146, y: 184, text: 'คลอง', strong: true },
+    ],
+    className: 'mx-auto block h-auto w-full max-w-[400px] sm:hidden',
+  },
+  {
+    id: 'fb-wide',
+    width: 570,
+    height: 205,
+    ground: 'M0 70 H120 L170 190 H350 L400 90 H570',
+    water: { path: 'M139 116 H387 L350 190 H170 Z', y: 116, x1: 139, x2: 387 },
+    bank: { y: 90, x1: 300, x2: 570 },
+    arrowX: 440,
+    waterExt: { x1: 387, x2: 440 },
+    font: 14,
+    labels: [
+      { x: 8, y: 58, text: 'ตลิ่งฝั่งซ้าย' },
+      { x: 408, y: 78, text: 'ตลิ่งฝั่งขวา (ต่ำกว่า)' },
+      { x: 452, y: 108, text: 'ระยะห่างตลิ่ง', strong: true },
+      { x: 196, y: 106, text: 'ผิวน้ำ (ระดับน้ำ)' },
+      { x: 215, y: 160, text: 'คลอง', strong: true },
+    ],
+    className: 'hidden h-auto w-full sm:block',
+  },
+]
+
+function DiagramSvg({ d }: { d: DiagramLayout }) {
+  const { arrowX: x, bank, water } = d
+  return (
+    <svg viewBox={`0 0 ${d.width} ${d.height}`} className={d.className} role="img" aria-labelledby={`${d.id}-title ${d.id}-desc`}>
+      <title id={`${d.id}-title`}>ภาพตัดขวางคลองแสดงระยะห่างตลิ่ง</title>
+      <desc id={`${d.id}-desc`}>ระยะห่างตลิ่งคือระยะแนวดิ่งจากผิวน้ำขึ้นไปถึงขอบตลิ่งฝั่งที่ต่ำกว่า</desc>
+      {/* ground & banks */}
+      <path d={`${d.ground} V${d.height} H0 Z`} fill="var(--grid)" />
+      <path d={d.ground} fill="none" stroke="var(--axis)" strokeWidth="2" />
+      {/* water */}
+      <path d={water.path} fill="var(--s1)" opacity="0.28" />
+      <line x1={water.x1} x2={water.x2} y1={water.y} y2={water.y} stroke="var(--s1)" strokeWidth="2" />
+      {/* lower bank reference */}
+      <line x1={bank.x1} x2={bank.x2} y1={bank.y} y2={bank.y} stroke="var(--text-2)" strokeWidth="1" strokeDasharray="4 3" />
+      {/* freeboard arrow */}
+      <line x1={x} x2={x} y1={bank.y + 4} y2={water.y - 4} stroke="var(--text)" strokeWidth="1.6" />
+      <path d={`M${x} ${bank.y} l-5 7 h10 Z M${x} ${water.y} l-5 -7 h10 Z`} fill="var(--text)" />
+      {d.waterExt && (
+        <line x1={d.waterExt.x1} x2={d.waterExt.x2} y1={water.y} y2={water.y} stroke="var(--text-2)" strokeWidth="1" strokeDasharray="4 3" />
+      )}
+      {d.labels.map((l) => (
+        <text key={l.text} x={l.x} y={l.y} fontSize={d.font} textAnchor={l.anchor ?? 'start'} fill={l.strong ? 'var(--text)' : 'var(--text-2)'}>
+          {l.text}
+        </text>
+      ))}
+    </svg>
+  )
+}
+
 /** Canal cross-section explaining freeboard (ระยะห่างตลิ่ง). */
 function FreeboardDiagram() {
   return (
     <figure className="rounded-xl bg-card-2 p-3">
-      <svg viewBox="0 0 570 205" className="block h-auto w-full" role="img" aria-labelledby="fb-title fb-desc">
-        <title id="fb-title">ภาพตัดขวางคลองแสดงระยะห่างตลิ่ง</title>
-        <desc id="fb-desc">ระยะห่างตลิ่งคือระยะแนวดิ่งจากผิวน้ำขึ้นไปถึงขอบตลิ่งฝั่งที่ต่ำกว่า</desc>
-        {/* ground & banks */}
-        <path d="M0 70 H120 L170 190 H350 L400 90 H570 V205 H0 Z" fill="var(--grid)" />
-        <path d="M0 70 H120 L170 190 H350 L400 90 H570" fill="none" stroke="var(--axis)" strokeWidth="2" />
-        {/* water */}
-        <path d="M139 116 H379 L350 190 H170 Z" fill="var(--s1)" opacity="0.28" />
-        <line x1="139" x2="379" y1="116" y2="116" stroke="var(--s1)" strokeWidth="2" />
-        {/* lower bank reference */}
-        <line x1="300" x2="570" y1="90" y2="90" stroke="var(--text-2)" strokeWidth="1" strokeDasharray="4 3" />
-        {/* freeboard arrow */}
-        <line x1="440" x2="440" y1="94" y2="112" stroke="var(--text)" strokeWidth="1.6" />
-        <path d="M440 90 l-5 7 h10 Z M440 116 l-5 -7 h10 Z" fill="var(--text)" />
-        <text x="452" y="107" fontSize="13" fill="var(--text)">
-          ระยะห่างตลิ่ง
-        </text>
-        <line x1="379" x2="440" y1="116" y2="116" stroke="var(--text-2)" strokeWidth="1" strokeDasharray="4 3" />
-        {/* labels */}
-        <text x="8" y="60" fontSize="12.5" fill="var(--text-2)">
-          ตลิ่งฝั่งซ้าย
-        </text>
-        <text x="408" y="80" fontSize="12.5" fill="var(--text-2)">
-          ตลิ่งฝั่งขวา (ต่ำกว่า)
-        </text>
-        <text x="200" y="108" fontSize="12.5" fill="var(--text-2)">
-          ผิวน้ำ (ระดับน้ำ)
-        </text>
-        <text x="215" y="160" fontSize="12.5" fill="var(--text)">
-          คลอง
-        </text>
-      </svg>
+      {DIAGRAMS.map((d) => (
+        <DiagramSvg key={d.id} d={d} />
+      ))}
       <figcaption className="mt-2 text-sm text-text-2">
         ระยะห่างตลิ่ง = ระดับตลิ่งฝั่งที่ต่ำกว่า − ระดับน้ำ (ทั้งสองค่าวัดเทียบระดับอ้างอิงเดียวกัน หน่วยเมตร)
       </figcaption>

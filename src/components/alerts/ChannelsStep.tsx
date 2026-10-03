@@ -4,7 +4,10 @@ import { useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { ChannelType } from '@/lib/types'
 import { formatShortBkk } from '@/lib/time'
 import { api, CHANNEL_LABEL_TH, type ChannelLink, type PublicChannel, type PublicConfig, type TestResponse } from '@/lib/ui/api'
-import { pushSupport, randomTopic, subscribePush, type PushSupport } from '@/lib/ui/push'
+import { linkCodeExpired, pickerChannels } from '@/lib/ui/channels'
+import { bkkTime } from '@/lib/ui/chart'
+import { useNow } from '@/lib/ui/hooks'
+import { NEEDS_HTTPS_TH, pushSupport, randomTopic, subscribePush, type PushSupport } from '@/lib/ui/push'
 import { CopyButton } from '../CopyButton'
 import { IconBell, IconCheck, IconSend, IconTrash } from '../icons'
 
@@ -18,7 +21,8 @@ interface Props {
 
 const subscribeNoop = () => () => {}
 
-const CHANNEL_ORDER: ChannelType[] = ['webpush', 'line', 'telegram', 'ntfy', 'email', 'discord']
+/** Link instructions from POST /channels plus the expiry of the code they carry. */
+type LinkState = ChannelLink & { expiresAt?: string | null }
 
 const NOTES: Record<ChannelType, string> = {
   webpush: 'ได้รับแจ้งเตือนบนโทรศัพท์หรือคอมพิวเตอร์เครื่องนี้ แม้ไม่ได้เปิดหน้าเว็บ',
@@ -31,14 +35,14 @@ const NOTES: Record<ChannelType, string> = {
 
 /** Step 3: add notification channels, list them, send a test message. */
 export function ChannelsStep({ placeId, token, config, channels, onChanged }: Props) {
-  const [links, setLinks] = useState<Partial<Record<ChannelType, ChannelLink>>>({})
+  const [links, setLinks] = useState<Partial<Record<ChannelType, LinkState>>>({})
   const [test, setTest] = useState<{ busy: boolean; result?: TestResponse; error?: string }>({ busy: false })
   const enabled = config?.channels
   const verified = channels.filter((c) => c.verified)
 
   const add = async (type: ChannelType, target?: string): Promise<void> => {
     const r = await api.addChannel(placeId, token, { type, target })
-    if (r.link) setLinks((l) => ({ ...l, [type]: r.link }))
+    if (r.link) setLinks((l) => ({ ...l, [type]: { ...r.link!, expiresAt: r.channel?.linkExpiresAt ?? null } }))
     onChanged()
   }
 
@@ -86,8 +90,8 @@ export function ChannelsStep({ placeId, token, config, channels, onChanged }: Pr
   return (
     <div className="flex flex-col gap-5">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {/* Channels this server can send come first. */}
-        {[...CHANNEL_ORDER].sort((a, b) => Number(!enabled?.[a]) - Number(!enabled?.[b])).map((type) => card(type, forms[type], NOTES[type]))}
+        {/* Channels this server can send come first; e-mail only when the server offers it. */}
+        {pickerChannels(enabled).map((type) => card(type, forms[type], NOTES[type]))}
       </div>
 
       <section aria-labelledby="ch-list" className="rounded-xl border border-border">
@@ -177,6 +181,13 @@ function ErrorText({ error }: { error: string | null }) {
 function WebPushForm({ vapidKey, onAdd }: { vapidKey: string | null; onAdd: (subscription: string) => Promise<void> }) {
   const support = useSyncExternalStore<PushSupport | null>(subscribeNoop, pushSupport, () => null)
   const a = useAction()
+  if (support === 'insecure') {
+    return (
+      <p className="text-sm text-text">
+        การแจ้งเตือนบนอุปกรณ์{NEEDS_HTTPS_TH} ขณะนี้เว็บเปิดผ่าน http:// เบราว์เซอร์จึงไม่อนุญาต ให้ผู้ดูแลระบบตั้งค่า HTTPS หรือเลือกช่องทางอื่น เช่น ntfy, LINE หรือ Telegram
+      </p>
+    )
+  }
   if (support === 'ios-needs-install') {
     return (
       <p className="text-sm text-text">
@@ -207,28 +218,39 @@ function LinkCodeForm({
   onStart,
 }: {
   type: 'line' | 'telegram'
-  link?: ChannelLink
+  link?: LinkState
   pending?: PublicChannel
   bot?: string | null
   addFriendUrl?: string | null
   onStart: () => Promise<void>
 }) {
   const a = useAction()
+  const nowMs = useNow(null, 15_000)
+  // The code just handed out wins over the (possibly older) pending channel in the list.
   const code = link?.code ?? pending?.linkCode ?? null
+  const expiresAt = link?.code ? (link.expiresAt ?? (pending?.linkCode === link.code ? pending.linkExpiresAt : null)) : pending?.linkExpiresAt
+  const expired = !!code && linkCodeExpired(expiresAt, nowMs)
   const url =
     type === 'telegram'
       ? (link?.url ?? (bot && code ? `https://t.me/${bot.replace(/^@/, '')}?start=${code}` : null))
       : (link?.url ?? addFriendUrl ?? null)
-  if (!code) {
+  const startLabel = type === 'line' ? 'เชื่อมต่อ LINE' : 'เชื่อมต่อ Telegram'
+  if (!code || expired) {
     return (
       <div className="flex flex-col gap-2">
+        {expired && (
+          <p role="status" className="text-sm text-text">
+            <span className="font-medium">รหัสหมดอายุ</span> รหัสเชื่อมต่อมีอายุจำกัด กดขอรหัสใหม่ แล้วใช้รหัสใหม่แทน
+          </p>
+        )}
         <button type="button" className="fm-btn fm-btn-primary self-start" disabled={a.busy} onClick={() => void a.run(onStart)}>
-          {a.busy ? 'กำลังสร้างรหัส…' : type === 'line' ? 'เชื่อมต่อ LINE' : 'เชื่อมต่อ Telegram'}
+          {a.busy ? 'กำลังสร้างรหัส…' : expired ? 'ขอรหัสใหม่' : startLabel}
         </button>
         <ErrorText error={a.error} />
       </div>
     )
   }
+  const until = expiresAt ? Date.parse(expiresAt) : NaN
   return (
     <div className="flex flex-col gap-2 text-sm">
       {type === 'line' ? (
@@ -245,6 +267,7 @@ function LinkCodeForm({
         </span>
         <CopyButton text={code} label="คัดลอกรหัส" />
       </div>
+      {Number.isFinite(until) && <p className="text-xs text-muted">รหัสใช้ได้ถึง {bkkTime(until)} น.</p>}
       {url && (
         <a href={url} target="_blank" rel="noopener noreferrer" className="fm-btn fm-btn-primary self-start">
           {type === 'line' ? 'เพิ่มเพื่อน LINE' : 'เปิด Telegram'}
@@ -370,6 +393,8 @@ function ChannelRow({
   testBusy: boolean
 }) {
   const a = useAction()
+  const nowMs = useNow(null, 15_000)
+  const status = c.verified ? null : linkCodeExpired(c.linkExpiresAt, nowMs) ? 'รหัสหมดอายุ' : 'รอยืนยัน'
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
       <div className="min-w-0 flex-1">
@@ -383,7 +408,7 @@ function ChannelRow({
               <IconCheck size={12} /> พร้อมใช้งาน
             </span>
           ) : (
-            'รอยืนยัน'
+            status
           )}{' '}
           · เพิ่มเมื่อ {formatShortBkk(c.createdAt)}
         </p>

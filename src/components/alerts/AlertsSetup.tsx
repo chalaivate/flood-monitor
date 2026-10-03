@@ -208,7 +208,7 @@ function Step({ n, title, children, done, disabled }: { n?: number; title: strin
       <header className="flex items-center gap-3 px-4 pt-4 sm:px-5">
         {n !== undefined && (
           <span
-            className={`grid size-8 shrink-0 place-items-center rounded-full text-sm font-semibold ${done ? 'bg-accent text-white' : 'border border-border text-text-2'}`}
+            className={`grid size-8 shrink-0 place-items-center rounded-full text-sm font-semibold ${done ? 'bg-accent-fill text-white' : 'border border-border text-text-2'}`}
             aria-hidden="true"
           >
             {done ? '✓' : n}

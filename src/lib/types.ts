@@ -16,7 +16,6 @@ export type SourceId =
   | 'thaiwater-wl' // สสน. ThaiWater — water level (nationwide)
   | 'thaiwater-rain' // สสน. ThaiWater — rainfall 24h (nationwide)
   | 'thaiwater-road' // สสน. ThaiWater — mirror of BMA road flood sensors
-  | 'popnix' // flood.pop.in.th relay (fallback when BMA geo-blocks)
 
 export type StationKind = 'canal' | 'river' | 'pump' | 'roadflood' | 'rain'
 

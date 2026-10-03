@@ -1,5 +1,6 @@
 'use client'
 
+import type { LeafletEventHandlerFnMap, Path } from 'leaflet'
 import { Circle, CircleMarker, MapContainer, Marker, Tooltip, useMapEvents } from 'react-leaflet'
 import type { MapStation } from '@/lib/ui/api'
 import { BaseTiles, Recenter, SizeFix, homeMarkerIcon } from './leaflet-bits'
@@ -11,6 +12,21 @@ function ClickToPick({ onPick }: { onPick: (lat: number, lng: number) => void })
     },
   })
   return null
+}
+
+/**
+ * Station dots are context only (named on hover; the legend under the map explains them).
+ * Leaflet adds focus listeners to a layer with a tooltip, which makes Chromium put every
+ * SVG dot in the tab order as an unnamed stop ahead of the form, so take them out of the
+ * tab order and the accessibility tree once they are on the map.
+ */
+const DECORATIVE_DOT: LeafletEventHandlerFnMap = {
+  add: (e) => {
+    const el = (e.target as Path).getElement()
+    el?.setAttribute('tabindex', '-1')
+    el?.setAttribute('aria-hidden', 'true')
+    el?.setAttribute('focusable', 'false')
+  },
 }
 
 /** Small map for choosing a point: click to move the pin, radius circle, nearby gauges in grey. */
@@ -51,6 +67,7 @@ export default function PickerMap({
           center={[s.lat, s.lng]}
           radius={4}
           pathOptions={{ color: 'var(--card)', weight: 1.5, fillColor: 'var(--text-2)', fillOpacity: 1 }}
+          eventHandlers={DECORATIVE_DOT}
         >
           <Tooltip direction="top" offset={[0, -4]}>
             {s.name}

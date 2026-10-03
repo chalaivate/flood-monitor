@@ -19,7 +19,6 @@ export const SOURCE_PRIORITY: Record<SourceId, number> = {
   'thaiwater-road': 2,
   'thaiwater-rain': 2,
   'thaiwater-wl': 2,
-  popnix: 1,
 }
 
 function liveSources(config: AppConfig): Partial<Record<SourceId, SourceAdapter>> {

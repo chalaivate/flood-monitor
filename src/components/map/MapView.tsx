@@ -1,20 +1,22 @@
 'use client'
 
 import dynamic from 'next/dynamic'
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { distanceTh } from '@/lib/engine/format'
 import { haversineKm } from '@/lib/geo'
 import { bkkTime } from '@/lib/ui/chart'
+import { farDistanceTh } from '@/lib/ui/coverage'
 import { openLocationDialog } from '@/lib/ui/dialog'
 import { freeboardTh } from '@/lib/ui/format'
 import { useNow } from '@/lib/ui/hooks'
 import { LEVEL_LADDER, levelLabel } from '@/lib/ui/levels'
-import { FALLBACK_PLACE, usePlace } from '@/lib/ui/place'
+import { FALLBACK_PLACE, RADIUS_MAX_KM, usePlace } from '@/lib/ui/place'
 import { usePublicConfig } from '@/lib/ui/public-config'
 import { loadRadarFrames, type RadarFrame } from '@/lib/ui/rainviewer'
 import { countByFilter, DEFAULT_KIND_FILTERS, filterStations, KIND_FILTERS, useStations, type KindFilter } from '@/lib/ui/stations'
 import { IconCheck, IconChevronRight, IconLayers, IconMapPin, IconRefresh } from '../icons'
 import { LevelDot } from '../LevelBadge'
+import type { MapInsets } from './StationsMap'
 
 const StationsMap = dynamic(() => import('./StationsMap'), {
   ssr: false,
@@ -44,6 +46,20 @@ export function MapView() {
   const [panelPref, setPanelPref] = useState<boolean | null>(null)
   const wide = useSyncExternalStore(subscribeWide, () => window.matchMedia(WIDE_QUERY).matches, () => true)
   const panelOpen = panelPref ?? wide
+  const panelRef = useRef<HTMLElement>(null)
+  const [panelBox, setPanelBox] = useState({ w: 0, h: 0 })
+
+  // Track the panel's size so popups open clear of it (see mapInsets).
+  useEffect(() => {
+    const el = panelRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect()
+      setPanelBox({ w: Math.round(r.width), h: Math.round(r.height) })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   const all = stations.data?.stations ?? []
   const shown = filterStations(all, filters)
@@ -88,11 +104,15 @@ export function MapView() {
             selectedId={selected}
             nowMs={nowMs}
             onSetHome={(lat, lng) => openLocationDialog({ initial: { lat, lng, label: 'บ้าน' }, title: 'ตั้งตำแหน่งนี้เป็นบ้าน' })}
+            // Phones: the panel is a bottom sheet over the bottom-right attribution, so move it up.
+            attributionPosition={wide ? 'bottomright' : 'topright'}
+            insets={mapInsets(wide, panelOpen, panelBox)}
           />
         )}
       </div>
 
       <section
+        ref={panelRef}
         aria-label="ตัวกรองและคำอธิบายแผนที่"
         className="card absolute right-2 bottom-2 left-2 z-[1000] max-h-[55dvh] overflow-y-auto shadow-xl sm:top-3 sm:right-auto sm:bottom-auto sm:left-14 sm:max-h-[calc(100%-24px)] sm:w-[340px]"
       >
@@ -201,7 +221,11 @@ export function MapView() {
                     </ul>
                   )}
                   {d0Exceeds(nearest, home.radiusKm) && (
-                    <p className="mt-1 text-xs text-muted">ไม่มีจุดวัดในรัศมี {home.radiusKm} กม. ลองขยายรัศมี</p>
+                    <p className="mt-1 text-xs text-muted">
+                      {nearest[0]!.d > RADIUS_MAX_KM
+                        ? `จุดวัดที่ใกล้ที่สุดอยู่ห่าง ${farDistanceTh(nearest[0]!.d)} — อยู่นอกพื้นที่ครอบคลุม`
+                        : `ไม่มีจุดวัดในรัศมี ${home.radiusKm} กม. ลองขยายรัศมี`}
+                    </p>
                   )}
                 </>
               ) : (
@@ -218,6 +242,21 @@ export function MapView() {
       </section>
     </main>
   )
+}
+
+/**
+ * Map area hidden by the overlaid UI, for popup auto-pan. Wide screens: the panel is a column
+ * at the left (left-14, top-3); collapsed it is only a strip at the top. Phones: the panel is
+ * a bottom sheet (bottom-2) and the zoom control + attribution sit at the top.
+ */
+function mapInsets(wide: boolean, open: boolean, panel: { w: number; h: number }): MapInsets {
+  if (wide) {
+    if (panel.w === 0) return { top: 16, right: 16, bottom: 16, left: 56 }
+    return open && panel.h > 160
+      ? { top: 16, right: 16, bottom: 32, left: 56 + panel.w + 12 }
+      : { top: 12 + panel.h + 12, right: 16, bottom: 32, left: 56 }
+  }
+  return { top: 84, right: 12, bottom: panel.h + 8 + 12, left: 12 }
 }
 
 function d0Exceeds(list: { d: number }[], radiusKm: number): boolean {

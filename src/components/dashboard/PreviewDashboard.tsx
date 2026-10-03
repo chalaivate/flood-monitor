@@ -8,7 +8,7 @@ import { PREVIEW_VARIANTS, applyVariant, synthHistory, type PreviewVariant } fro
 import type { ResolvedPlace } from '@/lib/ui/place'
 import { Dashboard } from './Dashboard'
 
-/** Dev-only dashboard rendered from tests/fixtures/snapshot-sample.json (no API needed). */
+/** Dev-only dashboard rendered from src/app/dev/preview/snapshot-sample.json (no API needed). */
 export function PreviewDashboard({ snapshot, variant }: { snapshot: DashboardSnapshot; variant: PreviewVariant }) {
   const data = useMemo(() => applyVariant(snapshot, variant), [snapshot, variant])
   const history = useMemo(() => synthHistory(data), [data])

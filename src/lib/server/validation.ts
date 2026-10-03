@@ -107,7 +107,6 @@ const SOURCE_ID_SET: Record<SourceId, true> = {
   'thaiwater-wl': true,
   'thaiwater-rain': true,
   'thaiwater-road': true,
-  popnix: true,
 }
 const SOURCE_IDS = Object.keys(SOURCE_ID_SET) as [SourceId, ...SourceId[]]
 

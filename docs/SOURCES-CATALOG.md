@@ -9,7 +9,7 @@
 > ข้อมูลว่า "เรียกจาก cloud ได้หรือไม่" มาจากสองแหล่ง: (1) ไฟล์สถานะของบอทใน GitHub Actions ที่อ่านผ่าน raw.githubusercontent (ipunn, icyice1998, 3 ต.ค. 2569)
 > และ (2) log การทดสอบจากเซิร์ฟเวอร์ในเยอรมนีของโครงการ flood2026 (27 ก.ย. และ 2 ต.ค. 2569). รายการที่เขียนว่า "ยังไม่พิสูจน์" ต้องทดสอบจากเครื่องจริงของเราก่อนใช้
 
-สิ่งที่ระบบใช้อยู่แล้ว (ไม่นับเป็นของใหม่): `bma-canal`, `bma-rain`, `bma-roadflood`, `bma-pump`, `thaiwater-canal`, `thaiwater-wl`, `thaiwater-rain`, `thaiwater-road`, `popnix`, Open-Meteo, RainViewer และภาพเรดาร์ กทม.
+สิ่งที่ระบบใช้อยู่แล้ว (ไม่นับเป็นของใหม่): `bma-canal`, `bma-rain`, `bma-roadflood`, `bma-pump`, `thaiwater-canal`, `thaiwater-wl`, `thaiwater-rain`, `thaiwater-road`, Open-Meteo, RainViewer และภาพเรดาร์ กทม.
 
 ---
 

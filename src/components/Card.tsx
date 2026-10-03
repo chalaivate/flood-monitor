@@ -26,8 +26,10 @@ export function Card({
   return (
     <Tag className={`card min-w-0 ${className}`} id={id} aria-labelledby={title && headingId ? headingId : undefined}>
       {(title || action) && (
-        <header className="flex items-start justify-between gap-3 px-4 pt-4 sm:px-5 sm:pt-5">
-          <div className="min-w-0">
+        // flex-wrap + a minimum title width: a wide action wraps below the title instead of
+        // squeezing it into one syllable per line.
+        <header className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 px-4 pt-4 sm:px-5 sm:pt-5">
+          <div className="min-w-[min(100%,9rem)] flex-1">
             {title && (
               <h2 id={headingId} className="text-[1.3rem] leading-snug font-medium text-text sm:text-[1.45rem]">
                 {title}

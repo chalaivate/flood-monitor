@@ -2,6 +2,7 @@ import type { DashboardSnapshot } from '@/lib/types'
 import { distanceTh } from '@/lib/engine/format'
 import { rainClassTh } from '@/lib/engine/status'
 import { rainGauge } from '@/lib/ui/gauge'
+import { farDistanceTh, rainCoverage, type Coverage } from '@/lib/ui/coverage'
 import { LEVEL_COLOR, levelLabel } from '@/lib/ui/levels'
 import { Gauge } from '../Gauge'
 import { LevelBadge } from '../LevelBadge'
@@ -41,11 +42,25 @@ export function RainGaugeCard({ snapshot }: { snapshot: DashboardSnapshot }) {
           </p>
         </>
       ) : (
-        <p className="mt-1 text-sm text-text-2">ไม่พบสถานีวัดฝนที่มีข้อมูลล่าสุดใกล้บ้าน</p>
+        <p className="mt-1 text-sm text-text-2">{noRainTh(rainCoverage(snapshot))}</p>
       )}
       <p className="mt-2 text-[0.7rem] text-muted">
         เกณฑ์กรมอุตุนิยมวิทยา: ฝนหนัก ≥ {snapshot.place.rain.watch} มม. · หนักมาก ≥ {snapshot.place.rain.warning} มม.
       </p>
     </section>
   )
+}
+
+/** Why there is no rain figure: nearby gauges without data, out of coverage, or an outage. */
+function noRainTh(c: Coverage): string {
+  switch (c.kind) {
+    case 'outside':
+      return `สถานีวัดฝนที่ใกล้ที่สุดอยู่ห่าง ${farDistanceTh(c.nearestKm)} — อยู่นอกพื้นที่ครอบคลุม`
+    case 'expand':
+      return `ไม่มีสถานีวัดฝนในระยะค้นหา สถานีที่ใกล้ที่สุดอยู่ห่าง ${farDistanceTh(c.nearestKm)}`
+    case 'no-data':
+      return 'ขณะนี้ยังไม่มีข้อมูลฝนล่าสุดจากสถานีวัดฝน'
+    default:
+      return 'ไม่พบสถานีวัดฝนที่มีข้อมูลล่าสุดใกล้บ้าน'
+  }
 }

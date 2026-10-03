@@ -4,9 +4,11 @@ import dynamic from 'next/dynamic'
 import { useId, useState } from 'react'
 import { isInThailand, parseLatLng } from '@/lib/geo'
 import { distanceTh } from '@/lib/engine/format'
+import { farDistanceTh } from '@/lib/ui/coverage'
 import { coordsTh } from '@/lib/ui/format'
 import { FALLBACK_PLACE, RADIUS_MAX_KM, RADIUS_MIN_KM, STATIONS_MAX, STATIONS_MIN } from '@/lib/ui/place'
 import { usePublicConfig } from '@/lib/ui/public-config'
+import { NEEDS_HTTPS_TH } from '@/lib/ui/push'
 import { nearestWaterKm, suggestRadiusKm, useStations, waterStationsWithin } from '@/lib/ui/stations'
 import { IconCrosshair, IconMapPin } from './icons'
 
@@ -49,6 +51,12 @@ export function LocationPicker({ value, onChange, mapHeight = 280 }: { value: Pl
   const set = (patch: Partial<PlaceDraft>) => onChange({ ...value, ...patch })
 
   const usePosition = () => {
+    // Browsers refuse geolocation on plain http:// (other than localhost) with PERMISSION_DENIED,
+    // which would wrongly send people to their permission settings.
+    if (window.isSecureContext === false) {
+      setGeo({ kind: 'error', message: `การใช้ตำแหน่งปัจจุบัน${NEEDS_HTTPS_TH} แตะบนแผนที่หรือวางพิกัดแทนได้` })
+      return
+    }
     if (!('geolocation' in navigator)) {
       setGeo({ kind: 'error', message: 'เบราว์เซอร์นี้ไม่รองรับการระบุตำแหน่ง' })
       return
@@ -210,7 +218,8 @@ export function LocationPicker({ value, onChange, mapHeight = 280 }: { value: Pl
             <span className="flex flex-wrap items-center gap-2">
               <span>
                 ไม่พบจุดวัดระดับน้ำในรัศมีนี้
-                {nearestKm !== null ? ` · จุดที่ใกล้ที่สุดห่าง ${distanceTh(nearestKm)}` : ''}
+                {nearestKm !== null ? ` · จุดที่ใกล้ที่สุดห่าง ${farDistanceTh(nearestKm)}` : ''}
+                {nearestKm !== null && nearestKm > RADIUS_MAX_KM ? ' — อยู่นอกพื้นที่ครอบคลุม' : ''}
               </span>
               {suggestion !== null && (
                 <button type="button" className="fm-btn fm-btn-quiet" onClick={() => set({ radiusKm: suggestion })}>
