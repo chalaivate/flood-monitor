@@ -25,6 +25,9 @@ export const CRITICAL_REMINDER_MIN = 180
 /** Rapid-rise alerts fire when the station is already ≥ watch, or will reach watch within this horizon. */
 export const RAPID_RISE_HORIZON_H = 3
 
+/** Appended to every alert: this is the system's own assessment, not an official warning. */
+export const ALERT_DISCLAIMER = 'ประเมินอัตโนมัติจากข้อมูลหน่วยงาน ไม่ใช่ประกาศทางการ · กทม. 1555 · ปภ. 1784'
+
 export type AlertEventDraft = Omit<AlertEvent, 'id' | 'deliveries'>
 
 export interface AlertInput {
@@ -276,6 +279,7 @@ export function mergeFindings(place: Place, findings: Finding[], now: Date, dash
   const lines = sorted.map((f) => `• ${f.line}`)
   const footer = [`พื้นที่: ${place.label}`, `เวลา ${formatShortBkk(now.toISOString())} น.`]
   if (dashboardUrl) footer.push(dashboardUrl)
+  footer.push(ALERT_DISCLAIMER)
   const body = [...lines, '', ...footer].join('\n')
   return {
     placeId: place.id,
