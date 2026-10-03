@@ -71,8 +71,20 @@ export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[] }
 
 let cached: AppConfig | null = null
 
+/** Default place in DATA_MODE=fixture: the centre of the simulated data set (Prawet). */
+const DEMO_DEFAULT = { DEFAULT_LAT: '13.7208', DEFAULT_LNG: '100.683', DEFAULT_LABEL: 'บ้าน (ตัวอย่าง) ประเวศ' }
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
-  const parsed = schema.parse(env)
+  const withDemo =
+    env.DATA_MODE === 'fixture'
+      ? {
+          ...env,
+          DEFAULT_LAT: env.DEFAULT_LAT || DEMO_DEFAULT.DEFAULT_LAT,
+          DEFAULT_LNG: env.DEFAULT_LNG || DEMO_DEFAULT.DEFAULT_LNG,
+          DEFAULT_LABEL: env.DEFAULT_LABEL || DEMO_DEFAULT.DEFAULT_LABEL,
+        }
+      : env
+  const parsed = schema.parse(withDemo)
   const requested = parsed.SOURCES?.split(',').map((s) => s.trim()).filter(Boolean)
   const enabledSources = requested
     ? ALL_SOURCES.filter((s) => requested.includes(s))

@@ -1,0 +1,422 @@
+{
+  "generatedAt": "2026-10-03T04:35:00.000Z",
+  "place": {
+    "label": "บ้าน ประเวศ",
+    "lat": 13.72,
+    "lng": 100.7,
+    "radiusKm": 5,
+    "maxStations": 4,
+    "freeboard": {
+      "watch": 0.6,
+      "warning": 0.3,
+      "critical": 0.1
+    },
+    "rain": {
+      "watch": 35.1,
+      "warning": 90.1,
+      "critical": 150
+    },
+    "rapidRiseCm": 10
+  },
+  "overall": {
+    "level": "watch",
+    "headline": "เฝ้าระวัง — น้ำใกล้ตลิ่ง 1 จุด · น้ำท่วมถนน 1 จุด",
+    "lines": [
+      {
+        "level": "watch",
+        "text": "ปตร. คลองประเวศบุรีรมย์ ตอนวัดกระทุ่มเสือปลา: น้ำ 0.46 ม. ตลิ่ง 1.05 ม. ห่างตลิ่ง 0.59 ม. ขึ้น 4 ซม./ชม. (กทม.: วิกฤต)",
+        "stationId": "canal:WL.PWT.03"
+      },
+      {
+        "level": "watch",
+        "text": "น้ำท่วมถนน ถ.อ่อนนุช (ซ.อ่อนนุช 65): 6 ซม. (1.6 กม.)",
+        "stationId": "road:DEMO.FL.02"
+      },
+      {
+        "level": "normal",
+        "text": "คลองศาลาลอย ตอนถนนอ่อนนุช 61: น้ำ -0.19 ม. ตลิ่ง 0.50 ม. ห่างตลิ่ง 0.69 ม. ทรงตัว (กทม.: ปกติ)",
+        "stationId": "canal:WL.SLL.01"
+      },
+      {
+        "level": "normal",
+        "text": "คลองมะขามเทศ ตอนถนนพัฒนาการ: น้ำ -0.30 ม. ตลิ่ง 0.77 ม. ห่างตลิ่ง 1.07 ม. ลง 2 ซม./ชม. (กทม.: ปกติ)",
+        "stationId": "canal:WL.MKT.01"
+      },
+      {
+        "level": "normal",
+        "text": "ปตร. คลองประเวศบุรีรมย์ ตอนลาดกระบัง: น้ำ 0.79 ม. ตลิ่ง 1.98 ม. ห่างตลิ่ง 1.19 ม. ขึ้น 1 ซม./ชม. (กทม.: วิกฤต)",
+        "stationId": "canal:WL.PWT.01"
+      },
+      {
+        "level": "normal",
+        "text": "ฝน 24 ชม. (สูงสุดใน 3 สถานีรอบบ้าน): 20.6 มม. (ฝนปานกลาง) ที่ กรุงเทพฯ บางนา สกษ. (11.8 กม.)",
+        "stationId": "rain:DEMO.RF.01"
+      }
+    ]
+  },
+  "water": [
+    {
+      "station": {
+        "id": "canal:WL.PWT.03",
+        "source": "bma-canal",
+        "kind": "canal",
+        "code": "WL.PWT.03",
+        "name": "ปตร. คลองประเวศบุรีรมย์ ตอนวัดกระทุ่มเสือปลา",
+        "shortName": "ประเวศฯ วัดกระทุ่มฯ",
+        "waterway": "คลองประเวศบุรีรมย์",
+        "lat": 13.72396,
+        "lng": 100.68956,
+        "district": "ประเวศ",
+        "province": "กรุงเทพมหานคร",
+        "agency": "สำนักการระบายน้ำ กทม.",
+        "bankLevel": 1.05
+      },
+      "reading": {
+        "stationId": "canal:WL.PWT.03",
+        "observedAt": "2026-10-03T04:29:00.000Z",
+        "waterLevel": 0.46,
+        "freeboard": 0.59,
+        "officialStatus": "วิกฤต"
+      },
+      "level": "watch",
+      "stale": false,
+      "trendCmPerHour": 4,
+      "distanceKm": 1.2106598484584548
+    },
+    {
+      "station": {
+        "id": "canal:WL.SLL.01",
+        "source": "bma-canal",
+        "kind": "canal",
+        "code": "WL.SLL.01",
+        "name": "คลองศาลาลอย ตอนถนนอ่อนนุช 61",
+        "shortName": "ศาลาลอย อ่อนนุช 61",
+        "waterway": "คลองศาลาลอย",
+        "lat": 13.71599,
+        "lng": 100.67942,
+        "district": "ประเวศ",
+        "province": "กรุงเทพมหานคร",
+        "agency": "สำนักการระบายน้ำ กทม.",
+        "bankLevel": 0.5
+      },
+      "reading": {
+        "stationId": "canal:WL.SLL.01",
+        "observedAt": "2026-10-03T04:24:00.000Z",
+        "waterLevel": -0.19,
+        "freeboard": 0.69,
+        "officialStatus": "ปกติ"
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": 0,
+      "distanceKm": 2.2673931445739064
+    },
+    {
+      "station": {
+        "id": "canal:WL.MKT.01",
+        "source": "bma-canal",
+        "kind": "canal",
+        "code": "WL.MKT.01",
+        "name": "คลองมะขามเทศ ตอนถนนพัฒนาการ",
+        "shortName": "มะขามเทศ พัฒนาการ",
+        "waterway": "คลองมะขามเทศ",
+        "lat": 13.70015,
+        "lng": 100.67492,
+        "district": "ประเวศ",
+        "province": "กรุงเทพมหานคร",
+        "agency": "สำนักการระบายน้ำ กทม.",
+        "bankLevel": 0.77
+      },
+      "reading": {
+        "stationId": "canal:WL.MKT.01",
+        "observedAt": "2026-10-03T04:19:00.000Z",
+        "waterLevel": -0.3,
+        "freeboard": 1.07,
+        "officialStatus": "ปกติ"
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": -2,
+      "distanceKm": 3.4945971790149093
+    },
+    {
+      "station": {
+        "id": "canal:WL.PWT.01",
+        "source": "bma-canal",
+        "kind": "canal",
+        "code": "WL.PWT.01",
+        "name": "ปตร. คลองประเวศบุรีรมย์ ตอนลาดกระบัง",
+        "shortName": "ประเวศฯ ลาดกระบัง",
+        "waterway": "คลองประเวศบุรีรมย์",
+        "lat": 13.72625,
+        "lng": 100.74185,
+        "district": "ลาดกระบัง",
+        "province": "กรุงเทพมหานคร",
+        "agency": "สำนักการระบายน้ำ กทม.",
+        "bankLevel": 1.98
+      },
+      "reading": {
+        "stationId": "canal:WL.PWT.01",
+        "observedAt": "2026-10-03T04:29:00.000Z",
+        "waterLevel": 0.79,
+        "freeboard": 1.19,
+        "officialStatus": "วิกฤต"
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": 1,
+      "distanceKm": 4.573779683665498
+    }
+  ],
+  "rain": [
+    {
+      "station": {
+        "id": "rain:DEMO.RF.02",
+        "source": "bma-rain",
+        "kind": "rain",
+        "name": "สนข.ประเวศ",
+        "lat": 13.7177,
+        "lng": 100.6948,
+        "district": "ประเวศ",
+        "agency": "สำนักการระบายน้ำ กทม."
+      },
+      "reading": {
+        "stationId": "rain:DEMO.RF.02",
+        "observedAt": "2026-10-03T04:26:00.000Z",
+        "rain24h": 12.4,
+        "rain1h": 0
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": null,
+      "distanceKm": 0.617199483467924
+    },
+    {
+      "station": {
+        "id": "rain:DEMO.RF.05",
+        "source": "bma-rain",
+        "kind": "rain",
+        "name": "สนข.ลาดกระบัง",
+        "lat": 13.7225,
+        "lng": 100.7596,
+        "district": "ลาดกระบัง",
+        "agency": "สำนักการระบายน้ำ กทม."
+      },
+      "reading": {
+        "stationId": "rain:DEMO.RF.05",
+        "observedAt": "2026-10-03T04:26:00.000Z",
+        "rain24h": 8,
+        "rain1h": 0
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": null,
+      "distanceKm": 6.444092519897016
+    },
+    {
+      "station": {
+        "id": "rain:DEMO.RF.01",
+        "source": "bma-rain",
+        "kind": "rain",
+        "name": "กรุงเทพฯ บางนา สกษ.",
+        "lat": 13.6667,
+        "lng": 100.6056,
+        "district": "บางนา",
+        "agency": "สำนักการระบายน้ำ กทม."
+      },
+      "reading": {
+        "stationId": "rain:DEMO.RF.01",
+        "observedAt": "2026-10-03T04:26:00.000Z",
+        "rain24h": 20.6,
+        "rain1h": 0.5
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": null,
+      "distanceKm": 11.795521651953209
+    }
+  ],
+  "rainMax24h": {
+    "valueMm": 20.6,
+    "station": {
+      "id": "rain:DEMO.RF.01",
+      "source": "bma-rain",
+      "kind": "rain",
+      "name": "กรุงเทพฯ บางนา สกษ.",
+      "lat": 13.6667,
+      "lng": 100.6056,
+      "district": "บางนา",
+      "agency": "สำนักการระบายน้ำ กทม."
+    },
+    "distanceKm": 11.795521651953209,
+    "level": "normal"
+  },
+  "roadFlood": [
+    {
+      "station": {
+        "id": "road:DEMO.FL.02",
+        "source": "bma-roadflood",
+        "kind": "roadflood",
+        "name": "ถ.อ่อนนุช (ซ.อ่อนนุช 65)",
+        "lat": 13.7168,
+        "lng": 100.6851,
+        "district": "ประเวศ",
+        "agency": "สำนักการระบายน้ำ กทม."
+      },
+      "reading": {
+        "stationId": "road:DEMO.FL.02",
+        "observedAt": "2026-10-03T04:28:00.000Z",
+        "roadFloodCm": 6
+      },
+      "level": "watch",
+      "stale": false,
+      "trendCmPerHour": null,
+      "distanceKm": 1.6484051494797307
+    },
+    {
+      "station": {
+        "id": "road:DEMO.FL.03",
+        "source": "bma-roadflood",
+        "kind": "roadflood",
+        "name": "ถ.ลาดกระบัง (ซ.ลาดกระบัง 30/1)",
+        "lat": 13.7223,
+        "lng": 100.73718,
+        "district": "ลาดกระบัง",
+        "agency": "สำนักการระบายน้ำ กทม."
+      },
+      "reading": {
+        "stationId": "road:DEMO.FL.03",
+        "observedAt": "2026-10-03T04:28:00.000Z",
+        "roadFloodCm": 0
+      },
+      "level": "normal",
+      "stale": false,
+      "trendCmPerHour": null,
+      "distanceKm": 4.024383405180005
+    }
+  ],
+  "weather": {
+    "observedAt": "2026-10-03T04:30:00.000Z",
+    "condition": "มีเมฆมาก",
+    "weatherCode": 3,
+    "isDay": true,
+    "temperatureC": 31.4,
+    "humidityPct": 68,
+    "precipitationMmH": 0,
+    "precipitationProbabilityPct": 33,
+    "rainNext3hMm": 0.2,
+    "rainNext24hMm": 12.5,
+    "hourly": [
+      {
+        "time": "2026-10-03T05:00:00.000Z",
+        "precipitationMm": 0,
+        "probabilityPct": 15
+      },
+      {
+        "time": "2026-10-03T06:00:00.000Z",
+        "precipitationMm": 0,
+        "probabilityPct": 20
+      },
+      {
+        "time": "2026-10-03T07:00:00.000Z",
+        "precipitationMm": 0.2,
+        "probabilityPct": 33
+      },
+      {
+        "time": "2026-10-03T08:00:00.000Z",
+        "precipitationMm": 0.6,
+        "probabilityPct": 45
+      },
+      {
+        "time": "2026-10-03T09:00:00.000Z",
+        "precipitationMm": 1.4,
+        "probabilityPct": 60
+      },
+      {
+        "time": "2026-10-03T10:00:00.000Z",
+        "precipitationMm": 2.8,
+        "probabilityPct": 70
+      },
+      {
+        "time": "2026-10-03T11:00:00.000Z",
+        "precipitationMm": 1.9,
+        "probabilityPct": 62
+      },
+      {
+        "time": "2026-10-03T12:00:00.000Z",
+        "precipitationMm": 0.8,
+        "probabilityPct": 48
+      },
+      {
+        "time": "2026-10-03T13:00:00.000Z",
+        "precipitationMm": 0.3,
+        "probabilityPct": 30
+      },
+      {
+        "time": "2026-10-03T14:00:00.000Z",
+        "precipitationMm": 0,
+        "probabilityPct": 20
+      },
+      {
+        "time": "2026-10-03T15:00:00.000Z",
+        "precipitationMm": 0,
+        "probabilityPct": 15
+      },
+      {
+        "time": "2026-10-03T16:00:00.000Z",
+        "precipitationMm": 0,
+        "probabilityPct": 10
+      }
+    ],
+    "source": "Open-Meteo"
+  },
+  "radar": [
+    {
+      "id": "bma-nongchok",
+      "title": "เรดาร์ฝน กทม. (หนองจอก)",
+      "url": "/api/radar/bma/nongchok",
+      "source": "สำนักการระบายน้ำ กทม.",
+      "refreshMinutes": 5
+    },
+    {
+      "id": "bma-nongkhaem",
+      "title": "เรดาร์ฝน กทม. (หนองแขม)",
+      "url": "/api/radar/bma/nongkhaem",
+      "source": "สำนักการระบายน้ำ กทม.",
+      "refreshMinutes": 5
+    }
+  ],
+  "sources": [
+    {
+      "source": "bma-canal",
+      "ok": true,
+      "lastAttemptAt": "2026-10-03T04:31:00.000Z",
+      "lastSuccessAt": "2026-10-03T04:31:00.000Z",
+      "stationCount": 287
+    },
+    {
+      "source": "bma-rain",
+      "ok": true,
+      "lastAttemptAt": "2026-10-03T04:31:00.000Z",
+      "lastSuccessAt": "2026-10-03T04:31:00.000Z",
+      "stationCount": 181
+    },
+    {
+      "source": "bma-roadflood",
+      "ok": true,
+      "lastAttemptAt": "2026-10-03T04:31:00.000Z",
+      "lastSuccessAt": "2026-10-03T04:31:00.000Z",
+      "stationCount": 96
+    },
+    {
+      "source": "thaiwater-canal",
+      "ok": false,
+      "lastAttemptAt": "2026-10-03T04:31:00.000Z",
+      "lastSuccessAt": "2026-10-03T03:31:00.000Z",
+      "error": "timeout",
+      "stationCount": 0
+    }
+  ],
+  "lastIngestAt": "2026-10-03T04:31:00.000Z",
+  "pollMinutes": 10
+}

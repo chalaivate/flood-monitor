@@ -1,0 +1,127 @@
+@import 'tailwindcss';
+
+/* Theme tokens. Dark is the default (Home Assistant-like); light is opt-in via
+   data-theme="light" or the OS preference when no explicit choice was made. */
+:root {
+  color-scheme: dark;
+  --bg: #111111;
+  --card: #1c1c1c;
+  --card-2: #242424;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #e8e8e6;
+  --text-2: #b4b3ad;
+  --muted: #8a8984;
+  --grid: #2c2c2a;
+  --axis: #3a3a37;
+  --accent: #2486ff;
+  --accent-ink: #ffffff;
+
+  /* Status (fixed across themes; always paired with an icon/label). */
+  --lv-normal: #0ca30c;
+  --lv-watch: #fab219;
+  --lv-warning: #ec835a;
+  --lv-critical: #d03b3b;
+  --lv-unknown: #7d7c77;
+
+  /* Categorical series for charts (dark steps). */
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
+  --s5: #d55181;
+  --s6: #9085e9;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:where(:not([data-theme='dark'])) {
+    color-scheme: light;
+    --bg: #f2f2f0;
+    --card: #ffffff;
+    --card-2: #f6f6f4;
+    --border: rgba(11, 11, 11, 0.1);
+    --text: #141413;
+    --text-2: #52514e;
+    --muted: #7a7974;
+    --grid: #e6e5df;
+    --axis: #c3c2b7;
+    --s1: #2a78d6;
+    --s2: #eb6834;
+    --s3: #1baf7a;
+    --s4: #eda100;
+    --s5: #e87ba4;
+    --s6: #4a3aa7;
+  }
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f2f2f0;
+  --card: #ffffff;
+  --card-2: #f6f6f4;
+  --border: rgba(11, 11, 11, 0.1);
+  --text: #141413;
+  --text-2: #52514e;
+  --muted: #7a7974;
+  --grid: #e6e5df;
+  --axis: #c3c2b7;
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --s5: #e87ba4;
+  --s6: #4a3aa7;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-lv-normal: var(--lv-normal);
+  --color-lv-watch: var(--lv-watch);
+  --color-lv-warning: var(--lv-warning);
+  --color-lv-critical: var(--lv-critical);
+  --color-lv-unknown: var(--lv-unknown);
+  --font-sans: 'IBM Plex Sans Thai', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Card surface shared by every dashboard tile. */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

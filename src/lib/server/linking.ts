@@ -1,0 +1,81 @@
+import type { Store } from '../store/types'
+import type { Channel, ChannelType, Place } from '../types'
+import { extractLinkCodes } from './channels'
+
+// Account linking for chat channels: the web UI creates an unverified LINE /
+// Telegram channel with a link code; the user sends that code to our bot; the
+// webhook binds the chat id to the channel.
+
+export type LinkOutcome =
+  | { status: 'linked'; channel: Channel; place: Place | null }
+  | { status: 'not_found' }
+  | { status: 'no_code' }
+
+/** Try every code-looking token in `text`; link the first pending channel of `type`. */
+export async function linkByCode(store: Store, type: ChannelType, text: string, target: string): Promise<LinkOutcome> {
+  const codes = extractLinkCodes(text)
+  if (codes.length === 0) return { status: 'no_code' }
+  for (const code of codes) {
+    const ch = await store.findChannelByLinkCode(code)
+    if (!ch || ch.type !== type || ch.verified) continue
+    const linked: Channel = { ...ch, target, verified: true, linkCode: null }
+    await store.updateChannel(linked)
+    // Avoid duplicate deliveries: one chat linked twice to the same place keeps one channel.
+    for (const other of await store.listChannels(ch.placeId)) {
+      if (other.id !== linked.id && other.type === type && other.verified && other.target === target) {
+        await store.deleteChannel(other.id)
+      }
+    }
+    return { status: 'linked', channel: linked, place: await store.getPlace(ch.placeId) }
+  }
+  return { status: 'not_found' }
+}
+
+/** Places whose verified channel of `type` points at `target`. */
+export async function placesForTarget(store: Store, type: ChannelType, target: string): Promise<Place[]> {
+  const ids = new Set(
+    (await store.listChannels()).filter((c) => c.type === type && c.verified && c.target === target).map((c) => c.placeId),
+  )
+  const places: Place[] = []
+  for (const id of ids) {
+    const p = await store.getPlace(id)
+    if (p) places.push(p)
+  }
+  return places
+}
+
+/** Remove every channel of `type` bound to `target` (user blocked the bot / sent /stop). */
+export async function unlinkTarget(store: Store, type: ChannelType, target: string): Promise<number> {
+  const mine = (await store.listChannels()).filter((c) => c.type === type && c.target === target)
+  for (const c of mine) await store.deleteChannel(c.id)
+  return mine.length
+}
+
+export const BOT_TEXT = {
+  greeting: [
+    'ขอบคุณที่เพิ่ม Flood Monitor เป็นเพื่อน',
+    'ระบบนี้แจ้งเตือนเมื่อระดับน้ำในคลองใกล้บ้านใกล้ล้นตลิ่ง ฝนตกหนัก หรือมีน้ำท่วมถนน',
+    '',
+    'วิธีเชื่อมต่อ:',
+    '1. เปิดเว็บไซต์ แล้วไปที่หน้า "ตั้งค่าแจ้งเตือน"',
+    '2. กำหนดตำแหน่งบ้าน แล้วเลือกช่องทางนี้',
+    '3. ส่งรหัสเชื่อมต่อ 6 ตัวที่ได้รับมาในแชทนี้',
+    '',
+    'พิมพ์ "สถานะ" เพื่อดูสถานการณ์ล่าสุด',
+  ].join('\n'),
+  linked: (label: string) =>
+    `เชื่อมต่อการแจ้งเตือนสำหรับ "${label}" เรียบร้อยแล้ว\nระบบจะแจ้งเตือนในแชทนี้เมื่อสถานการณ์น้ำเปลี่ยนแปลง\nพิมพ์ "สถานะ" เพื่อดูสถานการณ์ล่าสุด`,
+  notFound: 'ไม่พบรหัสเชื่อมต่อนี้ หรือรหัสถูกใช้ไปแล้ว\nกรุณาตรวจสอบรหัสในหน้า "ตั้งค่าแจ้งเตือน" แล้วลองใหม่อีกครั้ง',
+  noPlaces: 'แชทนี้ยังไม่ได้เชื่อมต่อกับจุดเฝ้าระวัง\nกรุณาสร้างจุดเฝ้าระวังที่หน้า "ตั้งค่าแจ้งเตือน" บนเว็บไซต์ แล้วส่งรหัสเชื่อมต่อ 6 ตัวมาในแชทนี้',
+  help: 'ส่งรหัสเชื่อมต่อ 6 ตัวจากหน้า "ตั้งค่าแจ้งเตือน" เพื่อรับการแจ้งเตือน\nพิมพ์ "สถานะ" เพื่อดูสถานการณ์ล่าสุด',
+  stopped: (n: number) =>
+    n > 0 ? `ยกเลิกการแจ้งเตือนในแชทนี้แล้ว (${n} รายการ)` : 'แชทนี้ไม่มีการแจ้งเตือนที่เชื่อมต่ออยู่',
+  statusError: 'ขออภัย ไม่สามารถดึงสถานการณ์ล่าสุดได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง',
+  busy: 'ขออภัย มีคำขอจำนวนมาก กรุณาลองใหม่ในอีกสักครู่',
+} as const
+
+/** Does the message ask for the current situation? */
+export function isStatusRequest(text: string): boolean {
+  const t = text.trim().toLowerCase()
+  return t === 'สถานะ' || t === 'status' || t === '/status' || t.startsWith('/status@') || t === 'สถานการณ์'
+}
