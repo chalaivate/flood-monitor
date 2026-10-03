@@ -37,11 +37,10 @@ describe('BMA road flood', () => {
     expect(byId.get('road:FL.CTC.04')?.roadFloodCm).toBe(0)
     expect(byId.has('road:FL.BKP.03')).toBe(false)
   })
-  it('keys tunnels by direction', () => {
+  it('merges both tunnel directions into one station shared with the ThaiWater mirror', () => {
     const ids = out.stations.map((s) => s.id)
-    expect(ids).toContain('road:TN.BKA.01:ขาเข้า')
-    expect(ids).toContain('road:TN.BKA.01:ขาออก')
-    expect(out.stations.find((s) => s.id === 'road:TN.BKA.01:ขาออก')!.name).toBe('อุโมงค์ อ.ทหารราบ 11 (ขาออก)')
+    expect(ids.filter((id) => id.startsWith('road:TN.BKA.01'))).toEqual(['road:TN.BKA.01'])
+    expect(out.stations.find((s) => s.id === 'road:TN.BKA.01')!.name).toBe('อุโมงค์ อ.ทหารราบ 11')
   })
   it('helper', () => {
     expect(roadDepthFrom('น้ำท่วม', '20')).toBe(20)

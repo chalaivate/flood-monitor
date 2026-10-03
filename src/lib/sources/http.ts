@@ -14,8 +14,10 @@ export class HttpError extends Error {
   }
 }
 
-export interface RequestOptions extends RequestInit {
+export interface RequestOptions extends Omit<RequestInit, 'signal'> {
   timeoutMs: number
+  /** Cycle-wide deadline; combined with the per-request timeout. No retries once it fired. */
+  signal?: AbortSignal | null
   /** Delays (ms) before each retry on network errors / 403 / 5xx. Empty = no retries. */
   retryDelaysMs?: number[]
   /** Hook run once before the first retry after a 403 (e.g. cookie warm-up). */
@@ -32,12 +34,14 @@ function retryable(err: unknown): boolean {
 
 /** fetch with timeout + retries. 429 is never retried (back off for the whole cycle). */
 export async function request(fetchImpl: typeof fetch, url: string, opts: RequestOptions): Promise<Response> {
-  const { timeoutMs, retryDelaysMs = [], on403, sleep = defaultSleep, ...init } = opts
+  const { timeoutMs, retryDelaysMs = [], on403, sleep = defaultSleep, signal: cycleSignal, ...init } = opts
   let headers = { ...(init.headers as Record<string, string> | undefined) }
   let warmedUp = false
   for (let attempt = 0; ; attempt++) {
     try {
-      const res = await fetchImpl(url, { ...init, headers, signal: AbortSignal.timeout(timeoutMs) })
+      const timeout = AbortSignal.timeout(timeoutMs)
+      const signal = cycleSignal ? AbortSignal.any([cycleSignal, timeout]) : timeout
+      const res = await fetchImpl(url, { ...init, headers, signal })
       if (!res.ok) {
         // Drain the body so the connection can be reused.
         await res.arrayBuffer().catch(() => undefined)
@@ -46,7 +50,7 @@ export async function request(fetchImpl: typeof fetch, url: string, opts: Reques
       return res
     } catch (err) {
       const delay = retryDelaysMs[attempt]
-      if (delay === undefined || !retryable(err)) throw err
+      if (delay === undefined || !retryable(err) || cycleSignal?.aborted) throw err
       if (err instanceof HttpError && err.status === 403 && on403 && !warmedUp) {
         warmedUp = true
         const extra = await on403().catch(() => undefined)

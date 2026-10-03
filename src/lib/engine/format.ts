@@ -12,6 +12,12 @@ export function d1(v: number | null | undefined): string {
   return v === null || v === undefined || !Number.isFinite(v) ? '-' : v.toFixed(1)
 }
 
+/** "ห่างตลิ่ง 0.25 ม." or, for water above the bank, "ล้นตลิ่ง 0.12 ม.". */
+export function freeboardTh(fb: number | null | undefined): string {
+  if (fb === null || fb === undefined || !Number.isFinite(fb)) return 'ไม่มีข้อมูลตลิ่ง'
+  return fb < 0 ? `ล้นตลิ่ง ${m2(-fb)} ม.` : `ห่างตลิ่ง ${m2(fb)} ม.`
+}
+
 /** "+5 ซม./ชม." / "-3 ซม./ชม." / "" when unknown or flat (|x| < 1). */
 export function trendTh(cmPerHour: number | null | undefined): string {
   if (cmPerHour === null || cmPerHour === undefined || !Number.isFinite(cmPerHour)) return ''
@@ -32,7 +38,7 @@ export function stationDisplayName(s: StationStatus): string {
  * One situation line in the style of the reference dashboard, e.g.
  * "ปตร. คลองประเวศบุรีรมย์ ตอนลาดกระบัง: น้ำ 0.79 ม. ตลิ่ง 1.98 ม. ห่างตลิ่ง 1.19 ม. ขึ้น 4 ซม./ชม. (กทม.: วิกฤต)"
  */
-export function waterLineTh(s: StationStatus, now: Date = new Date()): string {
+export function waterLineTh(s: StationStatus, now: Date = new Date(), opts: { trend?: boolean } = {}): string {
   const name = stationDisplayName(s)
   const r = s.reading
   if (!r || s.stale) {
@@ -45,7 +51,7 @@ export function waterLineTh(s: StationStatus, now: Date = new Date()): string {
   } else {
     parts.push('ไม่มีข้อมูลความสูงตลิ่ง')
   }
-  const trend = trendTh(s.trendCmPerHour)
+  const trend = opts.trend === false ? '' : trendTh(s.trendCmPerHour)
   if (trend) parts.push(trend)
   const official = r.officialStatus ? ` (${agencyShort(s.station.agency)}: ${r.officialStatus})` : ''
   return `${name}: ${parts.join(' ')}${official}`

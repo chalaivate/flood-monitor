@@ -37,6 +37,12 @@ export interface Store {
   listSourceHealth(): Promise<SourceHealth[]>
   setMeta(key: string, value: string): Promise<void>
   getMeta(key: string): Promise<string | null>
+  /**
+   * Cross-process lease: true when `owner` now holds `name` (taken fresh, expired, or already
+   * held by the same owner, which extends it). Used to make alert evaluation single-flight.
+   */
+  tryLock(name: string, owner: string, ttlMs: number): Promise<boolean>
+  unlock(name: string, owner: string): Promise<void>
 
   // --- places & channels ---------------------------------------------------
   createPlace(place: Place): Promise<void>
@@ -54,6 +60,8 @@ export interface Store {
   // --- alerting ---------------------------------------------------------------
   getAlertStates(placeId: string): Promise<AlertState[]>
   setAlertStates(states: AlertState[]): Promise<void>
+  /** Forget every alert state of a place (after its location/thresholds change). */
+  clearAlertStates(placeId: string): Promise<void>
   appendAlertEvent(event: AlertEvent): Promise<void>
   listAlertEvents(placeId: string, limit: number): Promise<AlertEvent[]>
 }

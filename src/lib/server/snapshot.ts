@@ -45,7 +45,7 @@ export async function loadSnapshot(
 ): Promise<DashboardSnapshot> {
   const now = opts.now ?? new Date()
   const latest = await store.latest()
-  const ids = nearestWaterStationIds(latest, place)
+  const ids = nearestWaterStationIds(latest, place, now)
   const since = new Date(now.getTime() - SNAPSHOT_HISTORY_MIN * 60_000).toISOString()
   const [history, weather, sources, lastIngestAt] = await Promise.all([
     store.history(ids, since),

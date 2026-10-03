@@ -236,6 +236,19 @@ export class SupabaseStore implements Store {
     return row ? String(row.value) : null
   }
 
+  async tryLock(name: string, owner: string, ttlMs: number): Promise<boolean> {
+    const res = await this.client.rpc('try_lock', {
+      p_name: name,
+      p_owner: owner,
+      p_ttl_ms: Math.max(1, Math.round(ttlMs)),
+    })
+    return this.check('locks', res as PgResult<unknown>) === true
+  }
+
+  async unlock(name: string, owner: string): Promise<void> {
+    this.check('locks', await this.client.from('locks').delete().eq('name', name).eq('owner', owner))
+  }
+
   // --- places & channels ----------------------------------------------------------
   async createPlace(place: Place): Promise<void> {
     const res = await this.client
@@ -325,6 +338,10 @@ export class SupabaseStore implements Store {
     for (const chunk of chunks(rows, this.chunkSize)) {
       this.check('alert_states', await this.client.from('alert_states').upsert(chunk, { onConflict: 'place_id,key' }))
     }
+  }
+
+  async clearAlertStates(placeId: string): Promise<void> {
+    this.check('alert_states', await this.client.from('alert_states').delete().eq('place_id', placeId))
   }
 
   async appendAlertEvent(event: AlertEvent): Promise<void> {

@@ -3,9 +3,10 @@ import { evaluateAlerts } from './engine/alerts'
 import { buildSnapshot, nearestWaterStationIds, type SnapshotPlace } from './engine/snapshot'
 import type { ChannelSender, NotifyMessage } from './notify/types'
 import { SOURCE_PRIORITY } from './sources'
+import { HttpError } from './sources/http'
 import type { SourceAdapter } from './sources/types'
 import type { Store } from './store/types'
-import type { AlertEvent, Place, SourceFetchResult, SourceHealth } from './types'
+import type { AlertEvent, Place, SourceFetchResult } from './types'
 
 export interface CycleDeps {
   store: Store
@@ -15,6 +16,8 @@ export interface CycleDeps {
   fetch: typeof fetch
   now?: () => Date
   log?: (msg: string) => void
+  /** Ingest deadline override (e.g. a serverless maxDuration budget). */
+  deadlineMs?: number
 }
 
 export interface IngestReport {
@@ -23,10 +26,13 @@ export interface IngestReport {
 
 export interface AlertReport {
   places: number
+  /** true when another process held the alerts lease and this run did nothing. */
+  skipped?: boolean
   events: { placeId: string; title: string; delivered: number; failed: number }[]
 }
 
 export const META_LAST_INGEST = 'lastIngestAt'
+export const META_LAST_INGEST_ATTEMPT = 'lastIngestAttemptAt'
 export const META_LAST_ALERTS = 'lastAlertsAt'
 
 /** History window used for trend calculation (needs ≥ 60 min plus slack). */
@@ -60,27 +66,69 @@ function latestObservation(result: SourceFetchResult): string | null {
   return max
 }
 
+/** Thrown for sources skipped because their host refused us earlier in the cycle. */
+export class HostBackoffError extends Error {
+  constructor(host: string, reason: string) {
+    super(`ข้ามการดึงจาก ${host} ในรอบนี้ (${reason})`)
+    this.name = 'HostBackoffError'
+  }
+}
+
+export function hostOf(sourceId: string): string {
+  return sourceId.split('-')[0]!
+}
+
+/** A WAF refusal (429 rate limit, or 403 after the warm-up retry) means: stop hitting this host. */
+export function isHostRefusal(err: unknown): number | null {
+  return err instanceof HttpError && (err.status === 429 || err.status === 403) ? err.status : null
+}
+
+export interface PoliteOptions<S, T> {
+  /** Called as soon as each source settles (store it right away). */
+  onSettled?: (source: S, result: PromiseSettledResult<T>, index: number) => Promise<void>
+  /** Hosts to skip entirely this cycle, with the reason shown in source health. */
+  skipHosts?: Map<string, string>
+}
+
 /**
  * Run fetches so that sources on the same upstream host go one after another (BMA's WAF bans
- * bursts), while different hosts proceed in parallel. Results keep the input order.
+ * bursts), while different hosts proceed in parallel. After a 429/403 from a host its remaining
+ * sources are skipped for this cycle. Results keep the input order.
  */
 export async function fetchPolitely<S extends { id: string }, T>(
   sources: S[],
   run: (s: S) => Promise<T>,
+  opts: PoliteOptions<S, T> = {},
 ): Promise<PromiseSettledResult<T>[]> {
   const out: PromiseSettledResult<T>[] = new Array(sources.length)
   const groups = new Map<string, number[]>()
   sources.forEach((s, i) => {
-    const host = s.id.split('-')[0]!
+    const host = hostOf(s.id)
     groups.set(host, [...(groups.get(host) ?? []), i])
   })
   await Promise.all(
-    [...groups.values()].map(async (idxs) => {
+    [...groups.entries()].map(async ([host, idxs]) => {
+      let refusal: string | null = opts.skipHosts?.get(host) ?? null
       for (const i of idxs) {
-        try {
-          out[i] = { status: 'fulfilled', value: await run(sources[i]!) }
-        } catch (reason) {
-          out[i] = { status: 'rejected', reason }
+        let res: PromiseSettledResult<T>
+        if (refusal) {
+          res = { status: 'rejected', reason: new HostBackoffError(host, refusal) }
+        } else {
+          try {
+            res = { status: 'fulfilled', value: await run(sources[i]!) }
+          } catch (reason) {
+            res = { status: 'rejected', reason }
+            const status = isHostRefusal(reason)
+            if (status) refusal = `ต้นทางตอบ HTTP ${status}`
+          }
+        }
+        out[i] = res
+        if (opts.onSettled) {
+          try {
+            await opts.onSettled(sources[i]!, res, i)
+          } catch {
+            // bookkeeping errors must not stop the other sources
+          }
         }
       }
     }),
@@ -88,63 +136,89 @@ export async function fetchPolitely<S extends { id: string }, T>(
   return out
 }
 
-/** Fetch every enabled source, store stations/readings and record per-source health. */
+/** After a 429 the whole host is left alone for this long (meta key `backoff:<host>`). */
+export const RATE_LIMIT_BACKOFF_MIN = 30
+/** Default ingest deadline: never longer than this, and never longer than 80% of the poll period. */
+export const INGEST_DEADLINE_MAX_MS = 240_000
+
+/**
+ * Fetch every enabled source and store each one as soon as it answers (a slow upstream never
+ * delays the others), within a cycle deadline; record per-source health.
+ */
 export async function runIngest(deps: CycleDeps): Promise<IngestReport> {
   const now = deps.now?.() ?? new Date()
   const report: IngestReport = { results: [] }
-  const settled = await fetchPolitely(deps.sources, (s) =>
-    s.fetch({ fetch: deps.fetch, now, timeoutMs: deps.config.FETCH_TIMEOUT_MS }),
-  )
   const healthBefore = new Map((await deps.store.listSourceHealth()).map((h) => [h.source, h]))
-  for (let i = 0; i < deps.sources.length; i++) {
-    const src = deps.sources[i]!
-    const res = settled[i]!
-    const attemptAt = new Date().toISOString()
-    if (res.status === 'fulfilled') {
-      let inserted = 0
-      try {
-        inserted = await storeSourceResult(deps.store, res.value)
-      } catch (err) {
-        deps.log?.(`[ingest] ${src.id} store failed: ${errorText(err)}`)
-      }
-      const health: SourceHealth = {
-        source: src.id,
-        ok: true,
-        lastAttemptAt: attemptAt,
-        lastSuccessAt: attemptAt,
-        error: null,
-        stationCount: res.value.stations.length,
-        latestObservationAt: latestObservation(res.value),
-      }
-      await deps.store.setSourceHealth(health)
-      report.results.push({
-        source: src.id,
-        ok: true,
-        stations: res.value.stations.length,
-        readings: res.value.readings.length,
-        inserted,
-        warnings: res.value.warnings,
-      })
-      deps.log?.(`[ingest] ${src.id}: ${res.value.stations.length} stations, ${inserted} new readings`)
-    } else {
-      const prev = healthBefore.get(src.id)
-      const error = errorText(res.reason)
-      await deps.store.setSourceHealth({
-        source: src.id,
-        ok: false,
-        lastAttemptAt: attemptAt,
-        lastSuccessAt: prev?.lastSuccessAt ?? null,
-        error: src.thaiIpOnly && /timeout|ECONNRESET|ETIMEDOUT|fetch failed|403/i.test(error)
-          ? `${error} (แหล่งข้อมูลนี้รับเฉพาะ IP ในประเทศไทย)`
-          : error,
-        stationCount: prev?.stationCount ?? 0,
-        latestObservationAt: prev?.latestObservationAt ?? null,
-      })
-      report.results.push({ source: src.id, ok: false, stations: 0, readings: 0, inserted: 0, error, warnings: [] })
-      deps.log?.(`[ingest] ${src.id} FAILED: ${error}`)
-    }
+  const deadlineMs = deps.deadlineMs ?? Math.max(30_000, Math.min(deps.config.POLL_MINUTES * 60_000 * 0.8, INGEST_DEADLINE_MAX_MS))
+  const signal = AbortSignal.timeout(deadlineMs)
+
+  // Hosts still cooling down after a 429 in an earlier cycle.
+  const skipHosts = new Map<string, string>()
+  for (const host of new Set(deps.sources.map((s) => hostOf(s.id)))) {
+    const until = await deps.store.getMeta(`backoff:${host}`)
+    if (until && Date.parse(until) > now.getTime()) skipHosts.set(host, `พักการดึงหลังโดนจำกัดอัตรา ถึง ${until}`)
   }
-  await deps.store.setMeta(META_LAST_INGEST, now.toISOString())
+
+  let stored = 0
+  await fetchPolitely(
+    deps.sources,
+    (s) => s.fetch({ fetch: deps.fetch, now, timeoutMs: deps.config.FETCH_TIMEOUT_MS, signal }),
+    {
+      skipHosts,
+      onSettled: async (src, res) => {
+        const attemptAt = new Date().toISOString()
+        const prev = healthBefore.get(src.id)
+        if (res.status === 'fulfilled') {
+          try {
+            const inserted = await storeSourceResult(deps.store, res.value)
+            stored++
+            await deps.store.setSourceHealth({
+              source: src.id,
+              ok: true,
+              lastAttemptAt: attemptAt,
+              lastSuccessAt: attemptAt,
+              error: res.value.warnings.length ? `บางส่วนล้มเหลว: ${res.value.warnings.slice(0, 3).join('; ')}` : null,
+              stationCount: res.value.stations.length,
+              latestObservationAt: latestObservation(res.value) ?? prev?.latestObservationAt ?? null,
+            })
+            report.results.push({
+              source: src.id,
+              ok: true,
+              stations: res.value.stations.length,
+              readings: res.value.readings.length,
+              inserted,
+              warnings: res.value.warnings,
+            })
+            deps.log?.(`[ingest] ${src.id}: ${res.value.stations.length} stations, ${inserted} new readings`)
+            return
+          } catch (err) {
+            res = { status: 'rejected', reason: new Error(`store failed: ${errorText(err)}`) }
+          }
+        }
+        const error = errorText(res.reason)
+        if (isHostRefusal(res.reason) === 429) {
+          await deps.store.setMeta(`backoff:${hostOf(src.id)}`, new Date(now.getTime() + RATE_LIMIT_BACKOFF_MIN * 60_000).toISOString())
+        }
+        await deps.store.setSourceHealth({
+          source: src.id,
+          ok: false,
+          lastAttemptAt: attemptAt,
+          lastSuccessAt: prev?.lastSuccessAt ?? null,
+          error:
+            src.thaiIpOnly && /timeout|ECONNRESET|ETIMEDOUT|fetch failed|403/i.test(error)
+              ? `${error} (แหล่งข้อมูลนี้รับเฉพาะ IP ในประเทศไทย)`
+              : error,
+          stationCount: prev?.stationCount ?? 0,
+          latestObservationAt: prev?.latestObservationAt ?? null,
+        })
+        report.results.push({ source: src.id, ok: false, stations: 0, readings: 0, inserted: 0, error, warnings: [] })
+        deps.log?.(`[ingest] ${src.id} FAILED: ${error}`)
+      },
+    },
+  )
+  // lastIngestAt means "fresh data arrived", so the stale banner fires when every source fails.
+  if (stored > 0) await deps.store.setMeta(META_LAST_INGEST, now.toISOString())
+  await deps.store.setMeta(META_LAST_INGEST_ATTEMPT, now.toISOString())
   return report
 }
 
@@ -198,63 +272,91 @@ export async function deliverEvent(deps: CycleDeps, place: Place, event: AlertEv
 }
 
 /** Evaluate alert rules for every watched place and dispatch notifications. */
+/** Lease name/TTL that makes alert evaluation single-flight across processes. */
+export const ALERTS_LOCK = 'alerts'
+export const ALERTS_LOCK_TTL_MS = 5 * 60_000
+/** When every channel of a place fails, re-raise the same findings this many more cycles. */
+export const MAX_DELIVERY_RETRIES = 3
+
+/** Evaluate alert rules for every watched place and dispatch notifications. */
 export async function runAlerts(deps: CycleDeps): Promise<AlertReport> {
   const now = deps.now?.() ?? new Date()
   const places = await deps.store.listPlaces()
   const report: AlertReport = { places: places.length, events: [] }
   if (places.length === 0) return report
 
-  const latest = await deps.store.latest()
-  const sinceIso = new Date(now.getTime() - TREND_WINDOW_MIN * 60_000).toISOString()
-
-  for (const place of places) {
-    try {
-      const sp = placeToSnapshotPlace(place)
-      const ids = nearestWaterStationIds(latest, sp)
-      const history = await deps.store.history(ids, sinceIso)
-      const snap = buildSnapshot({
-        place: sp,
-        latest,
-        history,
-        weather: null,
-        radar: [],
-        sources: [],
-        lastIngestAt: null,
-        pollMinutes: deps.config.POLL_MINUTES,
-        staleMinutes: deps.config.STALE_MINUTES,
-        now,
-      })
-      const prev = await deps.store.getAlertStates(place.id)
-      const out = evaluateAlerts({
-        place,
-        water: snap.water,
-        roadFlood: snap.roadFlood,
-        rainMax24h: snap.rainMax24h,
-        prev,
-        now,
-        dashboardUrl: dashboardUrl(deps.config, place),
-      })
-      if (out.event) {
-        const event: AlertEvent = { ...out.event, id: crypto.randomUUID() }
-        const delivered = await deliverEvent(deps, place, event)
-        await deps.store.appendAlertEvent(delivered)
-        const ok = delivered.deliveries?.filter((d) => d.ok).length ?? 0
-        report.events.push({
-          placeId: place.id,
-          title: event.title,
-          delivered: ok,
-          failed: (delivered.deliveries?.length ?? 0) - ok,
-        })
-        deps.log?.(`[alerts] ${place.label}: ${event.title} → ${ok} delivered`)
-      }
-      // Save states after delivery so a crash mid-send re-evaluates next cycle.
-      await deps.store.setAlertStates(out.states)
-    } catch (err) {
-      deps.log?.(`[alerts] place ${place.id} failed: ${errorText(err)}`)
-    }
+  // Embedded worker, relay ingest and cron can overlap: only one may evaluate and send.
+  const owner = `${process.pid}:${crypto.randomUUID()}`
+  if (!(await deps.store.tryLock(ALERTS_LOCK, owner, ALERTS_LOCK_TTL_MS))) {
+    deps.log?.('[alerts] skipped: another process is evaluating alerts')
+    return { ...report, skipped: true }
   }
-  await deps.store.setMeta(META_LAST_ALERTS, now.toISOString())
-  return report
+  try {
+    const latest = await deps.store.latest()
+    const sinceIso = new Date(now.getTime() - TREND_WINDOW_MIN * 60_000).toISOString()
+
+    for (const place of places) {
+      try {
+        const sp = placeToSnapshotPlace(place)
+        const ids = nearestWaterStationIds(latest, sp, now)
+        const history = await deps.store.history(ids, sinceIso)
+        const snap = buildSnapshot({
+          place: sp,
+          latest,
+          history,
+          weather: null,
+          radar: [],
+          sources: [],
+          lastIngestAt: null,
+          pollMinutes: deps.config.POLL_MINUTES,
+          staleMinutes: deps.config.STALE_MINUTES,
+          now,
+        })
+        const prev = await deps.store.getAlertStates(place.id)
+        const out = evaluateAlerts({
+          place,
+          water: snap.water,
+          roadFlood: snap.roadFlood,
+          rainMax24h: snap.rainMax24h,
+          rain: snap.rain,
+          prev,
+          now,
+          dashboardUrl: dashboardUrl(deps.config, place),
+        })
+        let statesToSave = out.states
+        if (out.event) {
+          const event: AlertEvent = { ...out.event, id: crypto.randomUUID() }
+          const delivered = await deliverEvent(deps, place, event)
+          await deps.store.appendAlertEvent(delivered)
+          const attempted = delivered.deliveries?.length ?? 0
+          const ok = delivered.deliveries?.filter((d) => d.ok).length ?? 0
+          report.events.push({ placeId: place.id, title: event.title, delivered: ok, failed: attempted - ok })
+          deps.log?.(`[alerts] ${place.label}: ${event.title} → ${ok}/${attempted} delivered`)
+
+          // Every channel failed (provider outage, network): keep the previous state for the
+          // keys in this message so the next cycle raises it again, a few times at most.
+          const retryKey = `alertRetry:${place.id}`
+          const retries = Number((await deps.store.getMeta(retryKey)) ?? 0) || 0
+          if (attempted > 0 && ok === 0 && retries < MAX_DELIVERY_RETRIES) {
+            const findingKeys = new Set(out.findings.map((f) => f.key))
+            statesToSave = out.states.filter((st) => !findingKeys.has(st.key))
+            await deps.store.setMeta(retryKey, String(retries + 1))
+            deps.log?.(`[alerts] ${place.label}: delivery failed on every channel, will retry (${retries + 1}/${MAX_DELIVERY_RETRIES})`)
+          } else if (retries > 0) {
+            await deps.store.setMeta(retryKey, '0')
+          }
+        }
+        // Save states after delivery so a crash mid-send re-evaluates next cycle.
+        await deps.store.setAlertStates(statesToSave)
+      } catch (err) {
+        deps.log?.(`[alerts] place ${place.id} failed: ${errorText(err)}`)
+      }
+    }
+    await deps.store.setMeta(META_LAST_ALERTS, now.toISOString())
+    return report
+  } finally {
+    await deps.store.unlock(ALERTS_LOCK, owner).catch(() => undefined)
+  }
 }
 
 /** One full poll: ingest → alerts → prune old readings. */

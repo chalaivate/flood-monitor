@@ -9,7 +9,7 @@ import type {
 } from '../types'
 import { LEVEL_ORDER } from '../types'
 import { formatShortBkk } from '../time'
-import { d1, distanceTh, levelTh, m2, stationDisplayName, trendTh, waterLineTh } from './format'
+import { d1, distanceTh, freeboardTh, levelTh, stationDisplayName, trendTh, waterLineTh } from './format'
 import { freeboardThresholdFor, rainClassTh, ROAD_FLOOD_CM } from './status'
 
 /** Water must recede this far past a threshold before we step a level down (avoids flapping). */
@@ -25,6 +25,9 @@ export const CRITICAL_REMINDER_MIN = 180
 /** Rapid-rise alerts fire when the station is already ≥ watch, or will reach watch within this horizon. */
 export const RAPID_RISE_HORIZON_H = 3
 
+/** Soft cap for alert bodies; senders apply their own hard limits. */
+export const MAX_BODY_CHARS = 1500
+
 /** Appended to every alert: this is the system's own assessment, not an official warning. */
 export const ALERT_DISCLAIMER = 'ประเมินอัตโนมัติจากข้อมูลหน่วยงาน ไม่ใช่ประกาศทางการ · กทม. 1555 · ปภ. 1784'
 
@@ -35,6 +38,8 @@ export interface AlertInput {
   water: StationStatus[]
   roadFlood: StationStatus[]
   rainMax24h: DashboardSnapshot['rainMax24h']
+  /** Gauges that rainMax24h was chosen from (stale ones included). */
+  rain?: StationStatus[]
   prev: AlertState[]
   now: Date
   /** Link appended to messages, e.g. https://host/?place=<id>. */
@@ -121,7 +126,7 @@ export function evaluateAlerts(input: AlertInput): AlertOutput {
           level,
           key,
           stationIds: [s.station.id],
-          title: `${levelTh(level)}: ${shortName(s)} ห่างตลิ่ง ${m2(fb)} ม.`,
+          title: `${levelTh(level)}: ${shortName(s)} ${freeboardTh(fb)}`,
           line: `${levelTh(level)} · ${waterLineTh(s, now)}`,
         })
         notified = true
@@ -133,7 +138,7 @@ export function evaluateAlerts(input: AlertInput): AlertOutput {
           level,
           key,
           stationIds: [s.station.id],
-          title: `${levelTh(level)}: ${shortName(s)} ห่างตลิ่ง ${m2(fb)} ม.`,
+          title: `${levelTh(level)}: ${shortName(s)} ${freeboardTh(fb)}`,
           line: `${levelTh(prevLevel)} → ${levelTh(level)} · ${waterLineTh(s, now)}`,
         })
         notified = true
@@ -156,7 +161,7 @@ export function evaluateAlerts(input: AlertInput): AlertOutput {
         level,
         key,
         stationIds: [s.station.id],
-        title: `ยังวิกฤต: ${shortName(s)} ห่างตลิ่ง ${m2(fb)} ม.`,
+        title: `ยังวิกฤต: ${shortName(s)} ${freeboardTh(fb)}`,
         line: `ยังอยู่ระดับวิกฤต · ${waterLineTh(s, now)}`,
       })
       notified = true
@@ -186,7 +191,7 @@ export function evaluateAlerts(input: AlertInput): AlertOutput {
       key,
       stationIds: [s.station.id],
       title: `น้ำขึ้นเร็ว: ${shortName(s)} ${trendTh(trend)}`,
-      line: `น้ำขึ้นเร็ว ${trendTh(trend)}${eta} · ${waterLineTh(s, now)}`,
+      line: `น้ำขึ้นเร็ว ${trendTh(trend)}${eta} · ${waterLineTh(s, now, { trend: false })}`,
     })
     touch(key, s.level, trend, true)
   }
@@ -197,7 +202,11 @@ export function evaluateAlerts(input: AlertInput): AlertOutput {
     const key = 'rain'
     const prev = prevByKey.get(key)
     if (rawLevel !== 'unknown') {
+      // A gauge going stale lowers the max without any real change, so only step down when
+      // every contributing gauge is fresh (otherwise its return would re-send the same alert).
+      const allFresh = (input.rain ?? []).every((r) => !r.stale)
       const level = settleLevel(prev?.level, rawLevel, (lvl) => {
+        if (!allFresh) return false
         const boundary = lvl === 'critical' ? place.rain.critical : lvl === 'warning' ? place.rain.warning : place.rain.watch
         return valueMm < boundary - RAIN_MARGIN_MM
       })
@@ -276,17 +285,31 @@ export function mergeFindings(place: Place, findings: Finding[], now: Date, dash
   )
   const top = sorted[0]!
   const title = sorted.length > 1 ? `${top.title} (+อีก ${sorted.length - 1} รายการ)` : top.title
-  const lines = sorted.map((f) => `• ${f.line}`)
   const footer = [`พื้นที่: ${place.label}`, `เวลา ${formatShortBkk(now.toISOString())} น.`]
   if (dashboardUrl) footer.push(dashboardUrl)
   footer.push(ALERT_DISCLAIMER)
-  const body = [...lines, '', ...footer].join('\n')
+  // Keep the footer (time, link, disclaimer) intact: drop whole bullet lines instead.
+  const footerText = ['', ...footer].join('\n')
+  const lines: string[] = []
+  let used = footerText.length
+  for (let i = 0; i < sorted.length; i++) {
+    const line = `• ${sorted[i]!.line}`
+    const more = sorted.length - i - 1
+    const reserve = more > 0 ? 40 : 0 // room for the "…และอีก N รายการ" line
+    if (lines.length > 0 && used + line.length + 1 + reserve > MAX_BODY_CHARS) {
+      lines.push(`…และอีก ${sorted.length - i} รายการ ดูในแดชบอร์ด`)
+      break
+    }
+    lines.push(line)
+    used += line.length + 1
+  }
+  const body = `${lines.join('\n')}${footerText}`
   return {
     placeId: place.id,
     kind: top.kind,
     level: top.level,
     title,
-    body: body.length > 1000 ? `${body.slice(0, 990)}…` : body,
+    body,
     stationIds: [...new Set(sorted.flatMap((f) => f.stationIds))],
     createdAt: now.toISOString(),
   }

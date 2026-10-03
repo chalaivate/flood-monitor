@@ -73,6 +73,11 @@ export interface Station {
    */
   bankUncertain?: boolean
   groundLevel?: number | null
+  /**
+   * Minutes after which this station's latest reading counts as stale, when the feed is slower
+   * than the per-kind default (e.g. hourly RID gauges relayed with ~80 min lag → 180).
+   */
+  staleMinutes?: number | null
   /** Agency thresholds, informational only (often unreliable for BMA). */
   officialWarning?: number | null
   officialCritical?: number | null
@@ -240,7 +245,7 @@ export interface WeatherNow {
   /** Forecast rain total next 3 h / 24 h, mm. */
   rainNext3hMm?: number | null
   rainNext24hMm?: number | null
-  /** Hourly forecast for a small sparkline (next 12 h). */
+  /** Hourly forecast for the next 12 h; `time` is the START of each one-hour interval. */
   hourly?: { time: string; precipitationMm: number; probabilityPct: number | null }[]
   source: string
 }

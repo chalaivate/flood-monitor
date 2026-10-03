@@ -40,6 +40,7 @@ async function bmaJson(ctx: SourceContext, url: string, init: RequestInit & { re
     retryDelaysMs: [5_000, 15_000],
     on403: () => bmaCookieWarmup(ctx, new URL(referer).pathname),
     sleep: ctx.sleep,
+    signal: ctx.signal,
   })
 }
 
@@ -107,13 +108,17 @@ export function roadDepthFrom(statusText: string | null, flood: unknown): number
   return 'offline'
 }
 
+/**
+ * Road and underpass sensors. Underpasses (typesite 2) report one row per direction; they are
+ * merged into one station `road:TN.xxx` (same id as the ThaiWater mirror) holding the deeper of
+ * the two fresh readings, so a tunnel is never listed twice.
+ */
 export function parseBmaRoadFlood(body: unknown, now: Date): SourceFetchResult {
   const rows = (body as { dtTbl?: unknown })?.dtTbl
   if (!Array.isArray(rows)) throw new Error('BMA road flood: expected {dtTbl: [...]}')
-  const stations: Station[] = []
-  const readings: Reading[] = []
+  const stations = new Map<string, Station>()
+  const readings = new Map<string, Reading>()
   const warnings: string[] = []
-  const seen = new Set<string>()
   for (const raw of rows as Row[]) {
     const code = cleanText(raw.flood_code)
     const pos = coords(raw)
@@ -122,31 +127,39 @@ export function parseBmaRoadFlood(body: unknown, now: Date): SourceFetchResult {
       continue
     }
     const tunnel = Number(raw.typesite) === 2
-    const direction = tunnel ? cleanText(raw.tunnel_sub_name) : null
-    const id = `road:${code}${direction ? `:${direction}` : ''}`
-    if (seen.has(id)) continue
-    seen.add(id)
-    const baseName = (cleanText(raw.flood_name) ?? cleanText(raw.flood_shortname) ?? code).replace(/\s*\*+$/, '')
-    stations.push({
-      id,
-      source: 'bma-roadflood',
-      kind: 'roadflood',
-      code,
-      name: `${tunnel ? 'อุโมงค์ ' : ''}${baseName}${direction ? ` (${direction})` : ''}`,
-      shortName: cleanText(raw.flood_shortname)?.replace(/\s*\*+$/, '') ?? null,
-      waterway: cleanText(raw.road_name),
-      ...pos,
-      district: cleanText(raw.districtName) ?? cleanText(raw.district_name),
-      province: 'กรุงเทพมหานคร',
-      agency: BMA_AGENCY,
-    })
+    const id = `road:${code.toUpperCase()}`
+    if (!stations.has(id)) {
+      const baseName = (cleanText(raw.flood_name) ?? cleanText(raw.flood_shortname) ?? code).replace(/\s*\*+$/, '')
+      stations.set(id, {
+        id,
+        source: 'bma-roadflood',
+        kind: 'roadflood',
+        code,
+        name: `${tunnel && !baseName.startsWith('อุโมงค์') ? 'อุโมงค์ ' : ''}${baseName}`,
+        shortName: cleanText(raw.flood_shortname)?.replace(/\s*\*+$/, '') ?? null,
+        waterway: cleanText(raw.road_name),
+        ...pos,
+        district: cleanText(raw.districtName) ?? cleanText(raw.district_name),
+        province: 'กรุงเทพมหานคร',
+        agency: BMA_AGENCY,
+      })
+    }
     const status = cleanText(raw.chkStatustxt)
     const depth = roadDepthFrom(status, raw.flood)
     const observedAt = observedAtFrom(raw.site_timestamp, now)
     if (depth === 'offline' || depth === null || !observedAt) continue
-    readings.push({ stationId: id, observedAt, roadFloodCm: depth, officialStatus: status })
+    const prev = readings.get(id)
+    if (!prev || depth > (prev.roadFloodCm ?? 0) || (depth === prev.roadFloodCm && observedAt > prev.observedAt)) {
+      readings.set(id, { stationId: id, observedAt, roadFloodCm: depth, officialStatus: status })
+    }
   }
-  return { source: 'bma-roadflood', stations, readings, fetchedAt: now.toISOString(), warnings }
+  return {
+    source: 'bma-roadflood',
+    stations: [...stations.values()],
+    readings: [...readings.values()],
+    fetchedAt: now.toISOString(),
+    warnings,
+  }
 }
 
 export const bmaRoadFloodSource: SourceAdapter = {

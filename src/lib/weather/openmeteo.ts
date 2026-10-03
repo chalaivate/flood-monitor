@@ -59,7 +59,8 @@ export function openMeteoUrl(lat: number, lng: number): string {
     longitude: lng.toFixed(4),
     current: 'temperature_2m,relative_humidity_2m,precipitation,weather_code,is_day',
     hourly: 'precipitation_probability,precipitation',
-    forecast_hours: '24',
+    // 25 = the hour in progress + 24 complete hours after it.
+    forecast_hours: '25',
     timezone: 'Asia/Bangkok',
   })
   return `${OPEN_METEO_URL}?${p.toString()}`
@@ -103,17 +104,28 @@ export function parseOpenMeteo(body: unknown, now: Date): WeatherNow | null {
   const times = b.hourly?.time ?? []
   const probs = b.hourly?.precipitation_probability ?? []
   const amounts = b.hourly?.precipitation ?? []
-  const hourly: NonNullable<WeatherNow['hourly']> = []
+  // Hourly values at T cover (T − 1 h, T]. We expose each hour by its START (T − 1 h) so labels
+  // read naturally ("11:00" = 11:00–12:00), and keep the hour in progress plus later hours.
+  const slots: { start: string; mm: number | null; prob: number | null }[] = []
   for (let i = 0; i < times.length; i++) {
-    const t = localToIso(times[i]!, offset)
-    if (!t) continue
-    // Hourly values at T cover (T − 1 h, T]: keep the hour still in progress and later ones.
-    if (Date.parse(t) <= now.getTime()) continue
-    hourly.push({ time: t, precipitationMm: finite(amounts[i]) ?? 0, probabilityPct: finite(probs[i]) })
+    const end = localToIso(times[i]!, offset)
+    if (!end || Date.parse(end) <= now.getTime()) continue
+    slots.push({ start: new Date(Date.parse(end) - 3_600_000).toISOString(), mm: finite(amounts[i]), prob: finite(probs[i]) })
   }
-  const next3 = hourly.slice(0, 3)
-  const next24 = hourly.slice(0, 24)
-  const probs3 = next3.map((h) => h.probabilityPct).filter((p): p is number => p !== null)
+  // A model gap (null) is unknown, never "no rain": totals over a window with a gap are null.
+  const total = (n: number) => {
+    const win = slots.slice(0, n)
+    if (win.length < n || win.some((h) => h.mm === null)) return null
+    return Math.round(win.reduce((sum, h) => sum + (h.mm ?? 0), 0) * 10) / 10
+  }
+  const probs3 = slots
+    .slice(0, 3)
+    .map((h) => h.prob)
+    .filter((p): p is number => p !== null)
+  const hourly: NonNullable<WeatherNow['hourly']> = slots
+    .filter((h): h is { start: string; mm: number; prob: number | null } => h.mm !== null)
+    .slice(0, 12)
+    .map((h) => ({ time: h.start, precipitationMm: h.mm, probabilityPct: h.prob }))
 
   return {
     observedAt,
@@ -124,9 +136,9 @@ export function parseOpenMeteo(body: unknown, now: Date): WeatherNow | null {
     humidityPct: finite(cur.relative_humidity_2m),
     precipitationMmH: precip === null ? null : Math.round(((precip * 60) / intervalMin) * 10) / 10,
     precipitationProbabilityPct: probs3.length ? Math.max(...probs3) : null,
-    rainNext3hMm: next3.length ? Math.round(next3.reduce((s, h) => s + h.precipitationMm, 0) * 10) / 10 : null,
-    rainNext24hMm: next24.length ? Math.round(next24.reduce((s, h) => s + h.precipitationMm, 0) * 10) / 10 : null,
-    hourly: hourly.slice(0, 12),
+    rainNext3hMm: total(3),
+    rainNext24hMm: total(24),
+    hourly,
     source: 'Open-Meteo',
   }
 }

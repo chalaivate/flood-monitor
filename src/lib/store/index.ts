@@ -21,6 +21,10 @@ const g = globalThis as typeof globalThis & StoreGlobal
 
 /** Build a new store for the given configuration (no caching). */
 export async function createStore(config: AppConfig): Promise<Store> {
+  if (config.STORE === 'supabase' && config.DATA_MODE === 'fixture') {
+    // Simulated readings use real station ids: they must never reach a shared database.
+    throw new Error('DATA_MODE=fixture cannot be used with STORE=supabase (demo data would overwrite real data)')
+  }
   if (config.STORE === 'supabase') {
     if (!config.SUPABASE_URL || !config.SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error('STORE=supabase requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY')

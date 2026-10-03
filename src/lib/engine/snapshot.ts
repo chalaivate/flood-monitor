@@ -47,10 +47,23 @@ export const RAIN_NEAREST_N = 3
 export const RAIN_MAX_KM = 15
 export const ROAD_FLOOD_MAX = 5
 
+/**
+ * A station without any reading in this horizon is treated as dead/decommissioned and never
+ * takes one of the place's slots (ThaiWater keeps listing gauges that stopped years ago).
+ * Briefly offline stations stay tracked and show as "ไม่มีข้อมูลล่าสุด".
+ */
+export const TRACK_HORIZON_H = 24
+
+export function isTrackable(row: LatestRow, now: Date): boolean {
+  if (!row.reading) return false
+  const age = now.getTime() - Date.parse(row.reading.observedAt)
+  return Number.isFinite(age) && age <= TRACK_HORIZON_H * 3_600_000
+}
+
 /** Stations whose readings we need history for (nearest water stations of a place). */
-export function nearestWaterStationIds(latest: LatestRow[], place: SnapshotPlace): string[] {
+export function nearestWaterStationIds(latest: LatestRow[], place: SnapshotPlace, now: Date = new Date()): string[] {
   return nearest(
-    latest.filter((r) => r.station.kind === 'canal' || r.station.kind === 'river'),
+    latest.filter((r) => (r.station.kind === 'canal' || r.station.kind === 'river') && isTrackable(r, now)),
     (r) => r.station,
     place,
     { radiusKm: place.radiusKm, limit: place.maxStations },
@@ -63,7 +76,7 @@ export function buildSnapshot(input: SnapshotInput): DashboardSnapshot {
 
   const pick = (kinds: string[], radiusKm: number, limit: number) =>
     nearest(
-      input.latest.filter((r) => kinds.includes(r.station.kind)),
+      input.latest.filter((r) => kinds.includes(r.station.kind) && isTrackable(r, now)),
       (r) => r.station,
       place,
       { radiusKm, limit },

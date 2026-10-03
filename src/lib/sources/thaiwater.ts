@@ -15,7 +15,11 @@ const FUTURE_TOLERANCE_MIN = 15
 /** Older readings are dropped at parse time: ThaiWater keeps returning long-dead stations. */
 const MAX_AGE_H = 72
 /** ThaiWater needs long timeouts (national payloads take 10–60 s). */
-const MIN_TIMEOUT_MS = 120_000
+/** National feeds are 2–5 MB and can take a minute from abroad; province feeds are small. */
+const NATIONAL_TIMEOUT_MS = 120_000
+const PROVINCE_TIMEOUT_MS = 30_000
+/** Province requests run with this much parallelism (be polite to api-v3). */
+const PROVINCE_PARALLEL = 2
 
 type Row = Record<string, unknown>
 type Obj = Record<string, unknown> | undefined
@@ -68,13 +72,57 @@ export function rowsOf(body: unknown, wrapper?: string): Row[] {
   return data as Row[]
 }
 
-async function getJson(ctx: SourceContext, path: string): Promise<unknown> {
+async function getJson(ctx: SourceContext, path: string, national = true): Promise<unknown> {
   return requestJson(ctx.fetch, `${THAIWATER_API}${path}`, {
     headers: thaiwaterHeaders(),
-    timeoutMs: Math.max(ctx.timeoutMs, MIN_TIMEOUT_MS),
-    retryDelaysMs: [3_000, 10_000],
+    timeoutMs: national ? Math.max(ctx.timeoutMs, NATIONAL_TIMEOUT_MS) : Math.min(ctx.timeoutMs, PROVINCE_TIMEOUT_MS),
+    retryDelaysMs: national ? [3_000, 10_000] : [3_000],
     sleep: ctx.sleep,
+    signal: ctx.signal,
   })
+}
+
+/**
+ * Fetch one path per province with limited parallelism. A failing province only drops its own
+ * rows (reported as a warning); the adapter fails only when every province failed.
+ */
+export async function fetchProvinces(
+  ctx: SourceContext,
+  codes: string[],
+  path: (code: string) => string,
+): Promise<{ rows: Row[]; warnings: string[] }> {
+  const rows: Row[] = []
+  const warnings: string[] = []
+  let failures = 0
+  let lastError: unknown = null
+  for (let i = 0; i < codes.length; i += PROVINCE_PARALLEL) {
+    const batch = codes.slice(i, i + PROVINCE_PARALLEL)
+    const settled = await Promise.allSettled(batch.map((code) => getJson(ctx, path(code), false)))
+    settled.forEach((res, j) => {
+      if (res.status === 'fulfilled') {
+        try {
+          rows.push(...rowsOf(res.value))
+          return
+        } catch (err) {
+          lastError = err
+        }
+      } else {
+        lastError = res.reason
+      }
+      failures++
+      const msg = lastError instanceof Error ? lastError.message : String(lastError)
+      warnings.push(`province ${batch[j]} failed: ${msg}`)
+    })
+  }
+  if (failures === codes.length) throw lastError instanceof Error ? lastError : new Error(String(lastError))
+  return { rows, warnings }
+}
+
+/** Stale allowance for hourly ThaiWater feeds (cadence 60 min + publishing lag up to ~90 min). */
+export const HOURLY_FEED_STALE_MIN = 180
+
+function agencyCode(row: Row): string | null {
+  return cleanText(obj(obj(row.agency)?.agency_shortname)?.en)?.toUpperCase() ?? null
 }
 
 function agencyOf(row: Row): string {
@@ -121,6 +169,8 @@ export function parseCanalWaterlevel(body: unknown, now: Date): SourceFetchResul
       province: th(obj(row.geocode)?.province_name) ?? 'กรุงเทพมหานคร',
       agency: 'สำนักการระบายน้ำ กทม. via ThaiWater',
       bankLevel: bank,
+      // Same rule as the BMA feed: a lower bank under 0.3 m is a likely placeholder.
+      bankUncertain: bank !== null && bank < 0.3 ? true : undefined,
       officialWarning: thresholdsOk ? warn : null,
       officialCritical: thresholdsOk ? crit : null,
     })
@@ -188,6 +238,8 @@ export function parseWaterlevel(rows: Row[], now: Date): SourceFetchResult {
       agency: agencyOf(row),
       bankLevel: bank === null ? null : round2(bank),
       groundLevel: num(st?.ground_level),
+      // HII telemetry reports every 10 min; RID/EGAT/FOP rows are hourly and land ~80 min late.
+      staleMinutes: agencyCode(row) === 'HII' ? null : HOURLY_FEED_STALE_MIN,
     })
     // Levels are metres above MSL and can be > 100 m upcountry — no |v| < 10 filter here.
     const wl = num(row.waterlevel_msl)
@@ -206,9 +258,9 @@ export function makeThaiwaterWaterlevelSource(provinces: string): SourceAdapter 
     thaiIpOnly: false,
     async fetch(ctx) {
       if (codes === 'all') return parseWaterlevel(rowsOf(await getJson(ctx, '/public/waterlevel_load'), 'waterlevel_data'), ctx.now)
-      const rows: Row[] = []
-      for (const code of codes) rows.push(...rowsOf(await getJson(ctx, `/provinces/waterlevel?province_code=${code}`)))
-      return parseWaterlevel(rows, ctx.now)
+      const { rows, warnings } = await fetchProvinces(ctx, codes, (code) => `/provinces/waterlevel?province_code=${code}`)
+      const out = parseWaterlevel(rows, ctx.now)
+      return { ...out, warnings: [...warnings, ...out.warnings] }
     },
   }
 }
@@ -243,6 +295,8 @@ export function parseRain24(rows: Row[], now: Date): SourceFetchResult {
       district: th(obj(row.geocode)?.amphoe_name),
       province: th(obj(row.geocode)?.province_name),
       agency: agencyOf(row),
+      // rain_24h is published hourly with a 1–1.5 h lag.
+      staleMinutes: HOURLY_FEED_STALE_MIN,
     })
     const rain24h = num(row.rain_24h)
     const observedAt = thaiwaterTime(row.rainfall_datetime, now)
@@ -262,9 +316,9 @@ export function makeThaiwaterRainSource(provinces: string): SourceAdapter {
     thaiIpOnly: false,
     async fetch(ctx) {
       if (codes === 'all') return parseRain24(rowsOf(await getJson(ctx, '/public/rain_24h')), ctx.now)
-      const rows: Row[] = []
-      for (const code of codes) rows.push(...rowsOf(await getJson(ctx, `/provinces/rain24?include_zero=1&province_code=${code}`)))
-      return parseRain24(rows, ctx.now)
+      const { rows, warnings } = await fetchProvinces(ctx, codes, (code) => `/provinces/rain24?include_zero=1&province_code=${code}`)
+      const out = parseRain24(rows, ctx.now)
+      return { ...out, warnings: [...warnings, ...out.warnings] }
     },
   }
 }

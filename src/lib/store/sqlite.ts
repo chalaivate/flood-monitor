@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS alert_events (
   data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS alert_events_place ON alert_events (place_id, created_at);
+CREATE TABLE IF NOT EXISTS locks (name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TEXT NOT NULL);
 `
 
 type Row = Record<string, unknown>
@@ -217,6 +218,26 @@ export class SqliteStore implements Store {
     return row ? String(row.value) : null
   }
 
+  async tryLock(name: string, owner: string, ttlMs: number): Promise<boolean> {
+    const now = new Date()
+    const expires = new Date(now.getTime() + ttlMs).toISOString()
+    return this.tx(() => {
+      this.db.prepare('DELETE FROM locks WHERE name = ? AND expires_at < ?').run(name, now.toISOString())
+      this.db
+        .prepare(
+          `INSERT INTO locks (name, owner, expires_at) VALUES (?, ?, ?)
+           ON CONFLICT(name) DO UPDATE SET expires_at = excluded.expires_at WHERE locks.owner = excluded.owner`,
+        )
+        .run(name, owner, expires)
+      const row = this.db.prepare('SELECT owner FROM locks WHERE name = ?').get(name) as Row | undefined
+      return row?.owner === owner
+    })
+  }
+
+  async unlock(name: string, owner: string): Promise<void> {
+    this.db.prepare('DELETE FROM locks WHERE name = ? AND owner = ?').run(name, owner)
+  }
+
   // --- places & channels ----------------------------------------------------------
   async createPlace(place: Place): Promise<void> {
     this.db.prepare('INSERT INTO places (id, data, created_at) VALUES (?, ?, ?)').run(place.id, JSON.stringify(place), place.createdAt)
@@ -291,6 +312,10 @@ export class SqliteStore implements Store {
     this.tx(() => {
       for (const s of states) stmt.run(s.placeId, s.key, JSON.stringify(s))
     })
+  }
+
+  async clearAlertStates(placeId: string): Promise<void> {
+    this.db.prepare('DELETE FROM alert_states WHERE place_id = ?').run(placeId)
   }
 
   async appendAlertEvent(event: AlertEvent): Promise<void> {

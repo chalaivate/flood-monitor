@@ -16,10 +16,9 @@ export const ROAD_FLOOD_CM = { watch: 5, warning: 15, critical: 30 } as const
  * Stale window per station kind. Rain gauges and road sensors report less regularly than
  * canal gauges (road sensors in particular only change on events), so they get more slack.
  */
-export function staleMinutesFor(kind: Station['kind'], base: number): number {
-  if (kind === 'rain') return Math.max(base, 90)
-  if (kind === 'roadflood') return Math.max(base, 180)
-  return base
+export function staleMinutesFor(kind: Station['kind'], base: number, feedMinutes?: number | null): number {
+  const kindDefault = kind === 'rain' ? Math.max(base, 90) : kind === 'roadflood' ? Math.max(base, 180) : base
+  return feedMinutes && feedMinutes > kindDefault ? feedMinutes : kindDefault
 }
 
 export function maxLevel(levels: Level[]): Level {
@@ -113,7 +112,7 @@ export interface StatusOptions {
 
 /** Compute the display/alert status of one station from its latest reading. */
 export function stationStatus(station: Station, reading: Reading | null, opts: StatusOptions): StationStatus {
-  const stale = !reading || isStale(reading.observedAt, opts.now, staleMinutesFor(station.kind, opts.staleMinutes))
+  const stale = !reading || isStale(reading.observedAt, opts.now, staleMinutesFor(station.kind, opts.staleMinutes, station.staleMinutes))
   let level: Level = 'unknown'
   if (reading && !stale) {
     if (station.kind === 'rain') level = rainLevel(reading.rain24h, opts.rain)

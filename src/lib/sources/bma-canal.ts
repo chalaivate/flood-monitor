@@ -143,7 +143,7 @@ export const BMA_HEADERS: Record<string, string> = {
 export async function bmaCookieWarmup(ctx: SourceContext, path = '/water'): Promise<Record<string, string> | void> {
   const res = await ctx.fetch(`${BMA_ORIGIN}${path}`, {
     headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
-    signal: AbortSignal.timeout(ctx.timeoutMs),
+    signal: ctx.signal ? AbortSignal.any([ctx.signal, AbortSignal.timeout(ctx.timeoutMs)]) : AbortSignal.timeout(ctx.timeoutMs),
   })
   const cookie = cookieHeaderFrom(res)
   await res.arrayBuffer().catch(() => undefined)
@@ -163,6 +163,7 @@ export const bmaCanalSource: SourceAdapter = {
       retryDelaysMs: [5_000, 15_000],
       on403: () => bmaCookieWarmup(ctx),
       sleep: ctx.sleep,
+      signal: ctx.signal,
     })
     const text = await res.text()
     let rows: unknown

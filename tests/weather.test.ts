@@ -32,7 +32,15 @@ describe('Open-Meteo', () => {
     // hourly values cover the preceding hour: 12:00 (11–12, in progress), 13:00, 14:00
     expect(w.precipitationProbabilityPct).toBe(45)
     expect(w.rainNext3hMm).toBe(3.8)
-    expect(w.hourly![0]!.time).toBe('2026-10-03T05:00:00.000Z')
+    // labelled by interval start: 11:00–12:00 ICT
+    expect(w.hourly![0]!.time).toBe('2026-10-03T04:00:00.000Z')
+    expect(w.rainNext24hMm).toBeNull() // only 3 future hours in this sample → unknown, not 0
+  })
+  it('treats model gaps as unknown, not as no rain', () => {
+    const gap = { ...body, hourly: { ...body.hourly, precipitation: [0, 0.2, null, 2.4, 0.3] } }
+    const w = parseOpenMeteo(gap, NOW)!
+    expect(w.rainNext3hMm).toBeNull()
+    expect(w.hourly!.map((h) => h.precipitationMm)).toEqual([2.4, 0.3])
   })
   it('returns null for error bodies and maps codes', () => {
     expect(parseOpenMeteo({ error: true, reason: 'bad' }, NOW)).toBeNull()
