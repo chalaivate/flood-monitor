@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config'
+import type { LookupFn } from '../server/net'
 import type { Channel, ChannelType, Level } from '../types'
 
 export interface NotifyMessage {
@@ -14,6 +15,10 @@ export interface NotifyMessage {
 
 export interface SendResult {
   ok: boolean
+  /**
+   * Short failure reason ("HTTP 403", "timeout", …). Stored in deliveries and shown to the
+   * place owner, so it must never contain an upstream response body.
+   */
   error?: string | null
   /** The target no longer exists (e.g. web push 404/410, LINE user blocked) — delete the channel. */
   gone?: boolean
@@ -22,6 +27,8 @@ export interface SendResult {
 export interface SendContext {
   config: AppConfig
   fetch: typeof fetch
+  /** DNS resolver for the SSRF check of user-supplied URLs (default: the system resolver). */
+  lookup?: LookupFn
 }
 
 export interface ChannelSender {

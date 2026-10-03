@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import webpush from 'web-push'
 import type { AppConfig } from '../config'
 import type { Channel } from '../types'
-import { SEND_TIMEOUT_MS, errorMessage, readErrorBody, truncate } from './format'
+import { SEND_TIMEOUT_MS, errorMessage, truncate } from './format'
+import { classifyResponse, fetchUserTarget, sendErrorText } from './http'
 import type { ChannelSender, NotifyMessage, SendResult } from './types'
 
 // Web Push (VAPID). web-push only builds the encrypted request; we send it with the
@@ -103,21 +104,18 @@ export const webPushSender: ChannelSender = {
       if (k.toLowerCase() !== 'content-length') headers[k] = String(v)
     }
     try {
-      const res = await ctx.fetch(details.endpoint, {
+      // The endpoint comes from the browser, i.e. from the user: SSRF-checked, no redirects.
+      const res = await fetchUserTarget(ctx, details.endpoint, {
         method: 'POST',
         headers,
         body: details.body ? new Uint8Array(details.body) : undefined,
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       })
-      if (res.ok) {
-        await res.arrayBuffer().catch(() => undefined)
-        return { ok: true }
-      }
-      const text = await readErrorBody(res, 200)
-      const gone = res.status === 404 || res.status === 410
-      return { ok: false, error: `push service HTTP ${res.status}${text ? `: ${text}` : ''}`, gone }
+      const { result, status } = await classifyResponse('push service', res)
+      // 404/410: the subscription expired or was revoked.
+      return result.ok ? result : { ...result, gone: status === 404 || status === 410 }
     } catch (err) {
-      return { ok: false, error: errorMessage(err) }
+      return { ok: false, error: sendErrorText(err) }
     }
   },
 }

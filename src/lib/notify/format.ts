@@ -115,10 +115,29 @@ export function errorMessage(err: unknown): string {
 /** Timeout applied to every outbound notification request. */
 export const SEND_TIMEOUT_MS = 15_000
 
-/** Read an error body as text (bounded), never throwing. */
+/**
+ * Read at most about `max` characters of a response body, never throwing. The body is
+ * streamed and cancelled once enough bytes arrived, so a huge or endless body cannot
+ * exhaust memory.
+ */
 export async function readErrorBody(res: Response, max = 500): Promise<string> {
   try {
-    return (await res.text()).slice(0, max)
+    if (!res.body) return ''
+    const reader = res.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    const byteLimit = max * 4 // UTF-8: at most 4 bytes per character
+    try {
+      while (total < byteLimit) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        total += value.byteLength
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined)
+    }
+    return Array.from(new TextDecoder().decode(Buffer.concat(chunks))).slice(0, max).join('')
   } catch {
     return ''
   }

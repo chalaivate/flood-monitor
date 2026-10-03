@@ -1,5 +1,6 @@
 import type { Channel, Level } from '../types'
-import { SEND_TIMEOUT_MS, bodyWithLink, errorMessage, readErrorBody, titleLine, truncate, truncateBytes } from './format'
+import { SEND_TIMEOUT_MS, bodyWithLink, titleLine, truncate, truncateBytes } from './format'
+import { classifyResponse, fetchUserTarget, sendErrorText } from './http'
 import type { ChannelSender, NotifyMessage, SendResult } from './types'
 
 // ntfy JSON publishing: POST {topic, title, message, ...} to the server root.
@@ -18,17 +19,20 @@ const TAGS: Record<Level, string[]> = {
   unknown: ['grey_question', 'flood'],
 }
 
-/** Resolve a channel target to the server root and topic. */
-export function ntfyTarget(target: string, baseUrl: string): { server: string; topic: string } | null {
+/**
+ * Resolve a channel target to the server root and topic. `custom` marks a server the
+ * user chose (full topic URL) as opposed to the operator's NTFY_BASE_URL.
+ */
+export function ntfyTarget(target: string, baseUrl: string): { server: string; topic: string; custom: boolean } | null {
   const t = target.trim()
-  if (NTFY_TOPIC_RE.test(t)) return { server: baseUrl.replace(/\/+$/, ''), topic: t }
+  if (NTFY_TOPIC_RE.test(t)) return { server: baseUrl.replace(/\/+$/, ''), topic: t, custom: false }
   try {
     const u = new URL(t)
     // https only: a public API must not be usable to POST into a private network.
     if (u.protocol !== 'https:') return null
     const topic = u.pathname.replace(/^\/+|\/+$/g, '')
     if (!NTFY_TOPIC_RE.test(topic) || u.username || u.password) return null
-    return { server: u.origin, topic }
+    return { server: u.origin, topic, custom: true }
   } catch {
     return null
   }
@@ -51,20 +55,22 @@ export const ntfySender: ChannelSender = {
     }
     if (msg.url) payload.click = msg.url
     try {
-      const res = await ctx.fetch(`${dest.server}/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-      })
-      if (res.ok) {
-        await res.arrayBuffer().catch(() => undefined)
-        return { ok: true }
-      }
-      const text = await readErrorBody(res, 300)
-      return { ok: false, error: `ntfy HTTP ${res.status}${text ? `: ${text}` : ''}` }
+      // A user-chosen server gets the SSRF check; NTFY_BASE_URL is operator config and
+      // may legitimately be a LAN host. Redirects are refused either way.
+      const res = await fetchUserTarget(
+        ctx,
+        `${dest.server}/`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+        },
+        { checkHost: dest.custom },
+      )
+      return (await classifyResponse('ntfy', res)).result
     } catch (err) {
-      return { ok: false, error: errorMessage(err) }
+      return { ok: false, error: sendErrorText(err) }
     }
   },
 }

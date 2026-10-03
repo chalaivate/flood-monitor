@@ -1,5 +1,6 @@
 import type { Channel } from '../types'
-import { APP_NAME, SEND_TIMEOUT_MS, errorMessage, plainText, readErrorBody } from './format'
+import { APP_NAME, SEND_TIMEOUT_MS, plainText } from './format'
+import { classifyResponse, fetchUserTarget, sendErrorText } from './http'
 import type { ChannelSender, NotifyMessage, SendResult } from './types'
 
 // Discord incoming webhook (the channel target is the webhook URL).
@@ -31,7 +32,9 @@ export const discordSender: ChannelSender = {
   async send(channel: Channel, msg: NotifyMessage, ctx): Promise<SendResult> {
     if (!isDiscordWebhookUrl(channel.target)) return { ok: false, error: 'invalid Discord webhook URL', gone: true }
     try {
-      const res = await ctx.fetch(channel.target, {
+      // The host is pinned to discord.com above; the DNS check and the refusal to follow
+      // redirects still apply because the URL is user input.
+      const res = await fetchUserTarget(ctx, channel.target, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -42,14 +45,10 @@ export const discordSender: ChannelSender = {
         }),
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       })
-      if (res.ok) {
-        await res.arrayBuffer().catch(() => undefined)
-        return { ok: true }
-      }
-      const text = await readErrorBody(res, 300)
-      return { ok: false, error: `Discord HTTP ${res.status}${text ? `: ${text}` : ''}`, gone: res.status === 404 }
+      const { result, status } = await classifyResponse('Discord', res)
+      return result.ok ? result : { ...result, gone: status === 404 }
     } catch (err) {
-      return { ok: false, error: errorMessage(err) }
+      return { ok: false, error: sendErrorText(err) }
     }
   },
 }
