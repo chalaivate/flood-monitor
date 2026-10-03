@@ -2,6 +2,7 @@ import type { AppConfig } from './config'
 import { evaluateAlerts } from './engine/alerts'
 import { buildSnapshot, nearestWaterStationIds, type SnapshotPlace } from './engine/snapshot'
 import type { ChannelSender, NotifyMessage } from './notify/types'
+import { SOURCE_PRIORITY } from './sources'
 import type { SourceAdapter } from './sources/types'
 import type { Store } from './store/types'
 import type { AlertEvent, Place, SourceFetchResult, SourceHealth } from './types'
@@ -36,9 +37,20 @@ function errorText(err: unknown): string {
   return String(err)
 }
 
-/** Persist one source result (used by the poller and by the relay ingest endpoint). */
+/**
+ * Persist one source result (used by the poller and by the relay ingest endpoint).
+ * Station metadata from a lower-priority source never overwrites a higher-priority one
+ * (e.g. the ThaiWater mirror must not replace BMA's own bank heights), but its readings
+ * are always stored — duplicates of (station, time) are ignored by the store.
+ */
 export async function storeSourceResult(store: Store, result: SourceFetchResult): Promise<number> {
-  await store.upsertStations(result.stations)
+  const existing = new Map((await store.listStations()).map((s) => [s.id, s]))
+  const incomingPriority = SOURCE_PRIORITY[result.source] ?? 0
+  const upserts = result.stations.filter((s) => {
+    const prev = existing.get(s.id)
+    return !prev || (SOURCE_PRIORITY[prev.source] ?? 0) <= incomingPriority
+  })
+  await store.upsertStations(upserts)
   return store.insertReadings(result.readings)
 }
 

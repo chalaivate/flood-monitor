@@ -12,6 +12,16 @@ import { isStale } from '../time'
 /** Road flood depth thresholds in cm (water on the road surface). */
 export const ROAD_FLOOD_CM = { watch: 5, warning: 15, critical: 30 } as const
 
+/**
+ * Stale window per station kind. Rain gauges and road sensors report less regularly than
+ * canal gauges (road sensors in particular only change on events), so they get more slack.
+ */
+export function staleMinutesFor(kind: Station['kind'], base: number): number {
+  if (kind === 'rain') return Math.max(base, 90)
+  if (kind === 'roadflood') return Math.max(base, 180)
+  return base
+}
+
 export function maxLevel(levels: Level[]): Level {
   let best: Level = 'unknown'
   for (const l of levels) if (LEVEL_ORDER[l] > LEVEL_ORDER[best]) best = l
@@ -103,7 +113,7 @@ export interface StatusOptions {
 
 /** Compute the display/alert status of one station from its latest reading. */
 export function stationStatus(station: Station, reading: Reading | null, opts: StatusOptions): StationStatus {
-  const stale = !reading || isStale(reading.observedAt, opts.now, opts.staleMinutes)
+  const stale = !reading || isStale(reading.observedAt, opts.now, staleMinutesFor(station.kind, opts.staleMinutes))
   let level: Level = 'unknown'
   if (reading && !stale) {
     if (station.kind === 'rain') level = rainLevel(reading.rain24h, opts.rain)

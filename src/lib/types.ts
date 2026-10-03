@@ -3,9 +3,9 @@
 // server code, client components, the worker and tests alike.
 
 /**
- * Data sources we ingest. Station ids are `${source}:${nativeId}`, except Bangkok canal
- * gauges which use `canal:${water_code}` (e.g. `canal:WL.KJN.02`) so the BMA feed and the
- * ThaiWater mirror of the same gauge merge into one station.
+ * Data sources we ingest. Station ids are `${source}:${nativeId}`, except BMA gauges that
+ * ThaiWater also republishes, which use the BMA code so both feeds merge into one station:
+ * `canal:WL.KJN.02`, `rain:RF.LSI.03`, `road:FL.WTL.04` (tunnels: `road:TN.BKA.01:ขาเข้า`).
  */
 export type SourceId =
   | 'bma-canal' // สำนักการระบายน้ำ กทม. — canal / gate water level (weather.bangkok.go.th)
@@ -15,6 +15,7 @@ export type SourceId =
   | 'thaiwater-canal' // สสน. ThaiWater — mirror of BMA canal gauges (cloud-reachable fallback)
   | 'thaiwater-wl' // สสน. ThaiWater — water level (nationwide)
   | 'thaiwater-rain' // สสน. ThaiWater — rainfall 24h (nationwide)
+  | 'thaiwater-road' // สสน. ThaiWater — mirror of BMA road flood sensors
   | 'popnix' // flood.pop.in.th relay (fallback when BMA geo-blocks)
 
 export type StationKind = 'canal' | 'river' | 'pump' | 'roadflood' | 'rain'

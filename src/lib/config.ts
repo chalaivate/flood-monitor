@@ -8,6 +8,7 @@ const ALL_SOURCES: SourceId[] = [
   'thaiwater-canal',
   'thaiwater-wl',
   'thaiwater-rain',
+  'thaiwater-road',
   'popnix',
   // BMA last: when both answer, the primary agency feed overwrites mirror metadata.
   'bma-canal',
@@ -58,6 +59,12 @@ const schema = z.object({
   RESEND_API_KEY: str(),
   EMAIL_FROM: str(),
   FETCH_TIMEOUT_MS: num(30_000),
+  /** ThaiWater province codes to ingest (10 = กรุงเทพฯ), or "all" for the national feeds. */
+  THAIWATER_PROVINCES: z.string().default('10,11,12,13'),
+  /** 0 disables alert evaluation in this process (when another process owns alerting). */
+  RUN_ALERTS: z.enum(['0', '1']).default('1'),
+  /** 1 runs the poller inside the Next.js server process (all-in-one Docker). */
+  EMBEDDED_WORKER: z.enum(['0', '1']).default('0'),
 })
 
 export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[] }
