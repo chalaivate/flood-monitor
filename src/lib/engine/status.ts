@@ -74,10 +74,17 @@ export function rainClassTh(mm: number | null | undefined): string {
   return 'ฝนหนักมาก'
 }
 
+function median(values: number[]): number {
+  const v = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(v.length / 2)
+  return v.length % 2 ? v[mid]! : (v[mid - 1]! + v[mid]!) / 2
+}
+
 /**
- * Water-level change in cm over roughly the last hour, from ascending history.
- * Uses the reading closest to (latest − 60 min) within a 40–100 minute window,
- * normalised to cm per hour. Returns null when there is not enough history.
+ * Water-level change in cm per hour over roughly the last hour, from ascending history.
+ * Uses the MEDIAN of readings in a 15-minute window at the end and in a window around
+ * (latest − 60 min), so one spike, dropout or pump-cycling dip cannot fake a rapid rise.
+ * Returns null when there is not enough history.
  */
 export function trendCmPerHour(history: Reading[]): number | null {
   const pts = history
@@ -87,16 +94,15 @@ export function trendCmPerHour(history: Reading[]): number | null {
     .sort((a, b) => a.t - b.t)
   const last = pts[pts.length - 1]
   if (!last) return null
-  const target = last.t - 60 * 60_000
-  let best: { t: number; v: number } | null = null
-  for (const p of pts) {
-    const ageMin = (last.t - p.t) / 60_000
-    if (ageMin < 40 || ageMin > 100) continue
-    if (!best || Math.abs(p.t - target) < Math.abs(best.t - target)) best = p
-  }
-  if (!best) return null
-  const hours = (last.t - best.t) / 3_600_000
-  const cm = ((last.v - best.v) * 100) / hours
+  const ageMin = (p: { t: number }) => (last.t - p.t) / 60_000
+  const endWin = pts.filter((p) => ageMin(p) <= 15)
+  let startWin = pts.filter((p) => ageMin(p) >= 45 && ageMin(p) <= 75)
+  if (startWin.length === 0) startWin = pts.filter((p) => ageMin(p) >= 40 && ageMin(p) <= 100)
+  if (startWin.length === 0 || endWin.length === 0) return null
+  const meanT = (w: { t: number }[]) => w.reduce((s, p) => s + p.t, 0) / w.length
+  const hours = (meanT(endWin) - meanT(startWin)) / 3_600_000
+  if (hours < 0.5) return null
+  const cm = ((median(endWin.map((p) => p.v)) - median(startWin.map((p) => p.v))) * 100) / hours
   return Math.round(cm * 10) / 10
 }
 

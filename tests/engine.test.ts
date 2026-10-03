@@ -109,6 +109,9 @@ describe('status', () => {
     const hist = [reading(id, 70, 0.5, 2), reading(id, 60, 0.52, 2), reading(id, 30, 0.6, 2), reading(id, 0, 0.64, 2)]
     expect(trendCmPerHour(hist)).toBeCloseTo(12, 0)
     expect(trendCmPerHour([reading(id, 0, 0.64, 2)])).toBeNull()
+    // a single spike at the end is ignored by the median
+    const spiky = [reading(id, 60, 0.5, 2), reading(id, 55, 0.5, 2), reading(id, 10, 0.5, 2), reading(id, 5, 0.51, 2), reading(id, 0, 1.2, 2)]
+    expect(Math.abs(trendCmPerHour(spiky)!)).toBeLessThan(5)
   })
   it('marks stale readings unknown', () => {
     const s = canal('1', 13.72, 100.75, 2)
