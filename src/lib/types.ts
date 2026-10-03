@@ -114,6 +114,11 @@ export interface SourceHealth {
   lastSuccessAt?: string | null
   error?: string | null
   stationCount?: number
+  /**
+   * Newest observation time in the last successful fetch. A source can answer HTTP 200 while
+   * every sensor is frozen, so freshness is judged on this, not on lastSuccessAt.
+   */
+  latestObservationAt?: string | null
 }
 
 /** Freeboard (distance water→bank) thresholds in metres. Below value ⇒ level. */

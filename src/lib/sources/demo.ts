@@ -124,7 +124,10 @@ function gridTimes(now: Date, hours: number): number[] {
   const step = STEP_MIN * 60_000
   const last = Math.floor(now.getTime() / step) * step
   const out: number[] = []
-  for (let t = last - hours * HOUR; t <= last; t += step) out.push(t)
+  // Start strictly inside the window so pruning (older than now − hours) never removes a point
+  // that the next cycle would insert again.
+  const first = Math.ceil((now.getTime() - hours * HOUR + 1) / step) * step
+  for (let t = Math.min(first, last); t <= last; t += step) out.push(t)
   return out
 }
 

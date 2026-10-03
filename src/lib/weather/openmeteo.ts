@@ -43,6 +43,8 @@ export function weatherCodeTh(code: number): string {
       return 'ฝนตกหนักเป็นช่วง ๆ'
     case 95:
       return 'พายุฝนฟ้าคะนอง'
+    case 97:
+      return 'พายุฝนฟ้าคะนองรุนแรง'
     case 96:
     case 99:
       return 'พายุฝนฟ้าคะนองและลูกเห็บ'
@@ -105,8 +107,8 @@ export function parseOpenMeteo(body: unknown, now: Date): WeatherNow | null {
   for (let i = 0; i < times.length; i++) {
     const t = localToIso(times[i]!, offset)
     if (!t) continue
-    // Keep the hour that contains "now" and the following ones.
-    if (Date.parse(t) + 3_600_000 <= now.getTime()) continue
+    // Hourly values at T cover (T − 1 h, T]: keep the hour still in progress and later ones.
+    if (Date.parse(t) <= now.getTime()) continue
     hourly.push({ time: t, precipitationMm: finite(amounts[i]) ?? 0, probabilityPct: finite(probs[i]) })
   }
   const next3 = hourly.slice(0, 3)

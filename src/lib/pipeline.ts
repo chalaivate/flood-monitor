@@ -54,12 +54,46 @@ export async function storeSourceResult(store: Store, result: SourceFetchResult)
   return store.insertReadings(result.readings)
 }
 
+function latestObservation(result: SourceFetchResult): string | null {
+  let max: string | null = null
+  for (const r of result.readings) if (!max || r.observedAt > max) max = r.observedAt
+  return max
+}
+
+/**
+ * Run fetches so that sources on the same upstream host go one after another (BMA's WAF bans
+ * bursts), while different hosts proceed in parallel. Results keep the input order.
+ */
+export async function fetchPolitely<S extends { id: string }, T>(
+  sources: S[],
+  run: (s: S) => Promise<T>,
+): Promise<PromiseSettledResult<T>[]> {
+  const out: PromiseSettledResult<T>[] = new Array(sources.length)
+  const groups = new Map<string, number[]>()
+  sources.forEach((s, i) => {
+    const host = s.id.split('-')[0]!
+    groups.set(host, [...(groups.get(host) ?? []), i])
+  })
+  await Promise.all(
+    [...groups.values()].map(async (idxs) => {
+      for (const i of idxs) {
+        try {
+          out[i] = { status: 'fulfilled', value: await run(sources[i]!) }
+        } catch (reason) {
+          out[i] = { status: 'rejected', reason }
+        }
+      }
+    }),
+  )
+  return out
+}
+
 /** Fetch every enabled source, store stations/readings and record per-source health. */
 export async function runIngest(deps: CycleDeps): Promise<IngestReport> {
   const now = deps.now?.() ?? new Date()
   const report: IngestReport = { results: [] }
-  const settled = await Promise.allSettled(
-    deps.sources.map((s) => s.fetch({ fetch: deps.fetch, now, timeoutMs: deps.config.FETCH_TIMEOUT_MS })),
+  const settled = await fetchPolitely(deps.sources, (s) =>
+    s.fetch({ fetch: deps.fetch, now, timeoutMs: deps.config.FETCH_TIMEOUT_MS }),
   )
   const healthBefore = new Map((await deps.store.listSourceHealth()).map((h) => [h.source, h]))
   for (let i = 0; i < deps.sources.length; i++) {
@@ -80,6 +114,7 @@ export async function runIngest(deps: CycleDeps): Promise<IngestReport> {
         lastSuccessAt: attemptAt,
         error: null,
         stationCount: res.value.stations.length,
+        latestObservationAt: latestObservation(res.value),
       }
       await deps.store.setSourceHealth(health)
       report.results.push({
@@ -103,6 +138,7 @@ export async function runIngest(deps: CycleDeps): Promise<IngestReport> {
           ? `${error} (แหล่งข้อมูลนี้รับเฉพาะ IP ในประเทศไทย)`
           : error,
         stationCount: prev?.stationCount ?? 0,
+        latestObservationAt: prev?.latestObservationAt ?? null,
       })
       report.results.push({ source: src.id, ok: false, stations: 0, readings: 0, inserted: 0, error, warnings: [] })
       deps.log?.(`[ingest] ${src.id} FAILED: ${error}`)

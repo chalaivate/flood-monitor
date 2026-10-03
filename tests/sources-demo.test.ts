@@ -14,7 +14,7 @@ describe('demo data', () => {
   it('produces 72h of 10-minute canal history and rain totals', () => {
     const c = demoCanal(NOW)
     const perStation = c.readings.filter((r) => r.stationId === c.stations[0]!.id)
-    expect(perStation.length).toBe(72 * 6 + 1)
+    expect(perStation.length).toBe(72 * 6)
     expect(perStation.at(-1)!.observedAt <= NOW.toISOString()).toBe(true)
     const r = demoRain(NOW)
     expect(r.readings.every((x) => (x.rain24h ?? -1) >= 0)).toBe(true)
