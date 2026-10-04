@@ -23,14 +23,21 @@
 
 ## เริ่มต้นใช้งานเร็ว (ข้อมูลสาธิต)
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/chalaivate/flood-monitor/tree/claude/flood-early-warning?quickstart=1)
+
+กดปุ่มด้านบนเพื่อรันบน GitHub Codespaces โดยไม่ต้องติดตั้งอะไร — ครั้งแรกใช้เวลาสร้างและ build ราว 3–5 นาที แล้วหน้าเว็บจะเปิดเอง
+(หรือแท็บ PORTS → พอร์ต 3000) · ลิงก์เดิมจะพากลับไป codespace ที่สร้างไว้แล้ว ไม่สร้างซ้ำ
+
+หรือรันในเครื่อง (macOS / Linux / Windows):
+
 ```bash
 npm ci
-DATA_MODE=fixture EMBEDDED_WORKER=1 npm run dev
-# เปิด http://localhost:3000
+npm run demo            # build + เปิดเซิร์ฟเวอร์พร้อมข้อมูลสาธิต → http://localhost:3000
+npm run demo -- --live  # ใช้ข้อมูลจริง (ข้อมูล กทม. ได้เฉพาะเครื่องที่อยู่ในไทย)
 ```
 
 ต้องใช้ Node.js 22.13+ — โหมดสาธิตใช้จุดวัดจริงแต่ค่าทั้งหมดเป็นค่าจำลอง (มีป้ายแจ้งบนหน้าเว็บ)
-บน Windows ให้ใส่ `DATA_MODE=fixture` และ `EMBEDDED_WORKER=1` ในไฟล์ `.env` แล้วรัน `npm run dev`
+สำหรับพัฒนาโค้ด: `DATA_MODE=fixture EMBEDDED_WORKER=1 npm run dev`
 
 ## ใช้งานจริง
 

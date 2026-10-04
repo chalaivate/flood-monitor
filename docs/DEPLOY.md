@@ -17,22 +17,29 @@
 
 ---
 
-## 0. ทดลองในเครื่องด้วยข้อมูลสาธิต
+## 0. ทดลองด้วยข้อมูลสาธิต
+
+**GitHub Codespaces (ไม่ต้องติดตั้ง):** เปิด https://codespaces.new/chalaivate/flood-monitor/tree/claude/flood-early-warning?quickstart=1
+- ครั้งแรก `.devcontainer/devcontainer.json` จะติดตั้งและ build ให้ (ราว 3–5 นาที) แล้วรัน `npm run demo` และเปิดพอร์ต 3000 ในเบราว์เซอร์
+- `?quickstart=1` พากลับไป codespace เดิมของ branch นี้แทนการสร้างใหม่
+- พอร์ตเป็นแบบ private (ต้องล็อกอิน GitHub บัญชีเจ้าของ) ถ้าจะให้คนอื่นดู: แท็บ PORTS → คลิกขวาพอร์ต 3000 → Port Visibility → Public
+- โควตาฟรีของบัญชีส่วนตัว 120 core-hours/เดือน (เครื่อง 2 core ≈ 60 ชม.) และพื้นที่ 15 GB-month — codespace หยุดเองเมื่อไม่ได้ใช้ (ค่าเริ่มต้น 30 นาที)
+  แต่ codespace ที่หยุดแล้วยังกินพื้นที่ ลบได้ที่ github.com/codespaces
+- ถ้าลิงก์เปิดผิด branch: ในหน้า repo เลือก branch `claude/flood-early-warning` → Code → Codespaces → Create codespace
+
+**ในเครื่อง (macOS / Linux / Windows):**
 
 ```bash
 npm ci
-DATA_MODE=fixture EMBEDDED_WORKER=1 npm run dev
-# เปิด http://localhost:3000
+npm run demo            # build เมื่อจำเป็น แล้วเปิดเซิร์ฟเวอร์ + ตัวดึงข้อมูล → http://localhost:3000
+npm run demo -- --live  # ข้อมูลจริง (ใน Codespaces ใช้เฉพาะ ThaiWater เพราะ กทม. รับเฉพาะ IP ไทย)
+npm run demo -- --build # บังคับ build ใหม่
 ```
 
-Windows (cmd/PowerShell) ตั้งตัวแปรแบบข้างบนไม่ได้ — ใส่ไว้ในไฟล์ `.env` แทน:
+`npm run demo` ใช้ `PORT`, `DATA_DIR`, `SOURCES`, `PUBLIC_BASE_URL` จาก environment หรือ `.env` ได้ (เช่น `PORT=3001` ในไฟล์ `.env`)
+โหมดสาธิตใช้ SQLite ในเครื่องเสมอ แม้ `.env` จะตั้ง `STORE=supabase`
 
-```
-DATA_MODE=fixture
-EMBEDDED_WORKER=1
-```
-
-แล้วรัน `npm run dev`
+สำหรับพัฒนาโค้ด: `DATA_MODE=fixture EMBEDDED_WORKER=1 npm run dev` (Windows: ใส่สองค่านี้ใน `.env` แล้วรัน `npm run dev`)
 
 โหมด `fixture` ใช้จุดวัดจริงของ กทม. (ชื่อ พิกัด ความสูงตลิ่ง) แต่ระดับน้ำ ฝน และน้ำบนถนนเป็น **ค่าจำลอง** ที่มีพายุฝนวนรอบทุก ~61 ชม.
 หน้าเว็บแสดงป้าย "ข้อมูลตัวอย่าง" ตลอด และเก็บข้อมูลแยกไฟล์ (`data/flood-demo.db`) ไม่ปนกับข้อมูลจริง
@@ -72,6 +79,9 @@ npm ci && npm run build           # build จะคัดลอก public แล
 # ใน .env: EMBEDDED_WORKER=1 และ DATA_DIR=/ที่อยู่เต็ม/ของ/flood-monitor/data (ควรเป็น path เต็ม)
 npm run start:standalone          # = node --env-file-if-exists=.env .next/standalone/server.js (รันจากโฟลเดอร์โปรเจกต์)
 ```
+
+ใน container (Docker, Dev Container, Codespaces) ตัวแปร `HOSTNAME` คือชื่อ container ทำให้ server ผูกกับ IP นั้นอย่างเดียว —
+ให้ตั้ง `HOSTNAME=0.0.0.0` ก่อน `npm run start:standalone` (`npm run demo` และ Docker image ตั้งให้แล้ว)
 
 การปิดเครื่องอย่างนุ่มนวลกับ `EMBEDDED_WORKER=1` ต้องมี `NEXT_MANUAL_SIG_HANDLE=true` ใน environment จริง
 (systemd `Environment=` หรือ `export`) — `npm run start:standalone` อ่านจาก `.env` ได้เพราะใช้ `--env-file`
