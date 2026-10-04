@@ -56,5 +56,6 @@ export const GET = handler('cctv cameras', async (req: Request) => {
     },
     new Date(),
   )
-  return json(body, { headers: { 'Cache-Control': 'public, max-age=60, stale-while-revalidate=300' } })
+  // Short and without stale-while-revalidate: a source that turns link-only must reach the UI quickly.
+  return json(body, { headers: { 'Cache-Control': 'public, max-age=30' } })
 })

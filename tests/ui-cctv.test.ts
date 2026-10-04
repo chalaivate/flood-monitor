@@ -168,7 +168,7 @@ describe('cctv frame states and Thai copy', () => {
       frameCopy(bma, { meta: meta({ changedAt: NOW - 60 * MIN }), loading: false, failure: null }, NOW),
       frameCopy(demo, { meta: meta(), loading: false, failure: null }, NOW),
       frameCopy(link, { meta: null, loading: false, failure: null }, NOW),
-      ...(['unreachable', 'timeout', 'no-image', 'budget', 'rate', 'not-found'] as const).map((f) =>
+      ...(['unreachable', 'timeout', 'no-image', 'budget', 'limited', 'unavailable'] as const).map((f) =>
         frameCopy(bma, { meta: null, loading: false, failure: f }, NOW),
       ),
     ]
@@ -185,15 +185,16 @@ describe('cctv frame states and Thai copy', () => {
   })
 
   it('alt text names camera, agency and time — never the scene', () => {
-    expect(cameraAltTh(bma, meta())).toBe('ภาพจากกล้อง ซอยทดสอบ 101 (สำนักการระบายน้ำ กทม.) ได้ภาพเมื่อ 10:41 น.')
-    expect(cameraAltTh(dwr, meta({ capturedAt: NOW - 27 * MIN }))).toBe('ภาพจากกล้อง ซอยทดสอบ TA100220 (กรมทรัพยากรน้ำ) ถ่ายเมื่อ 10:15 น.')
-    expect(cameraAltTh(demo, meta())).toContain(CCTV_DEMO_TH)
-    expect(cameraAltTh(bma, meta())).not.toMatch(/น้ำท่วม|แห้ง/)
+    expect(cameraAltTh(bma, meta(), NOW)).toBe('ภาพจากกล้อง ซอยทดสอบ 101 (สำนักการระบายน้ำ กทม.) ได้ภาพเมื่อ 10:41 น.')
+    expect(cameraAltTh(dwr, meta({ capturedAt: NOW - 27 * MIN }), NOW)).toBe('ภาพจากกล้อง ซอยทดสอบ TA100220 (กรมทรัพยากรน้ำ) ถ่ายเมื่อ 10:15 น.')
+    expect(cameraAltTh(demo, meta(), NOW)).toContain(CCTV_DEMO_TH)
+    expect(cameraAltTh(bma, meta(), NOW)).not.toMatch(/น้ำท่วม|แห้ง/)
   })
 
   it('maps image errors from status and the JSON reason', () => {
-    expect(failureFromResponse(404, { error: 'ไม่พบกล้องนี้', reason: 'not-found' })).toBe('not-found')
-    expect(failureFromResponse(429, null)).toBe('rate')
+    // 404 and 503 'unavailable': link-only for now (tests/ui-cctv-fixes.test.ts).
+    expect(failureFromResponse(404, { error: 'ไม่พบกล้องนี้', reason: 'not-found' })).toBe('unavailable')
+    expect(failureFromResponse(429, null)).toBe('limited')
     expect(failureFromResponse(503, { reason: 'budget' })).toBe('budget')
     expect(failureFromResponse(503, { reason: 'busy' })).toBe('budget')
     expect(failureFromResponse(502, { reason: 'no-image' })).toBe('no-image')
@@ -260,7 +261,7 @@ describe('cctv still loading (fetch → blob → object URL → decode)', () => 
     const busy = deps(new Response(JSON.stringify({ error: 'ระบบพักการดึงภาพชั่วคราว', reason: 'budget' }), { status: 503, headers: { 'Retry-After': '60' } }))
     expect(await loadFrame('/x.jpg', new AbortController().signal, busy.d)).toEqual({ ok: false, failure: 'budget', retryAfterSec: 60 })
     const gone = deps(new Response('{"error":"ไม่พบกล้องนี้"}', { status: 404 }))
-    expect(await loadFrame('/x.jpg', new AbortController().signal, gone.d)).toMatchObject({ ok: false, failure: 'not-found' })
+    expect(await loadFrame('/x.jpg', new AbortController().signal, gone.d)).toMatchObject({ ok: false, failure: 'unavailable' })
     expect(noImg.created.length + busy.created.length + gone.created.length).toBe(0)
   })
 
@@ -507,7 +508,7 @@ describe('cctv dashboard card and layout', () => {
     const sensors = sensorIndex([road('road:FL.W', 'watch', 12)])
     const html = renderToStaticMarkup(createElement(CameraCard, { data, place: { lat: 13.75, lng: 100.5, radiusKm: 3 }, sensors, nowMs: NOW }))
     expect(html).toContain('กล้อง CCTV ใกล้บ้าน')
-    expect(html).toContain(CCTV_CARD_SUBTITLE)
+    expect(html).toContain('ภาพนิ่งจากกล้องของหน่วยงาน อัปเดตราวทุก 1–3 นาที — ใช้ดูประกอบเท่านั้น สถานะมาจากเซ็นเซอร์วัดน้ำ ไม่ได้มาจากภาพ')
     expect(html).toContain('2 มุม')
     expect(html).toContain('300 ม.')
     expect(html).toContain('6.1 กม. · นอกรัศมี')

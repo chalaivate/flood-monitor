@@ -6,28 +6,32 @@ import type { Store } from '../store/types'
 import type { Camera, CameraCatalog, CameraSourceId } from '../types'
 import { publicOrigin } from './http'
 import { ImageCache, NotAttemptedError, type CachePolicy } from './image-cache'
-import { log } from './log'
+import { log, type Logger } from './log'
 import type { CameraLinkOut, CamerasResponse, PublicCamera } from './public'
+import { LIMITS, rateLimiter, type RateLimiter } from './rate-limit'
 
 // CCTV stills through our own server (GET /api/cctv/image/[source]/[file]). Modelled on
 // radar-proxy.ts: the client never supplies a URL; the upstream address is built here from a
 // fixed host per source and the server-only reference stored with the catalogue. Frames are
-// fetched on demand only, shared by every viewer (single-flight, short TTL), kept in memory
-// only (never on disk, in the database or in logs), and bounded by per-source concurrency and
-// hourly budgets so we stay gentle with the agencies' servers. No (client IP, camera) pair is
-// ever logged; only aggregate per-source counters are kept (exposed by /api/health).
+// fetched on demand only, shared by every viewer of this server process (single-flight, short
+// TTL), kept in memory only (never on disk, in the database or in logs) and dropped on time
+// even when no further requests come. Per-source concurrency and hourly budgets keep us gentle
+// with the agencies' servers, and per-client limits on cache misses keep one visitor from
+// using them up. All of this state is per process: serverless instances (Vercel) each have
+// their own, which is why CCTV_IMAGES defaults to 0 there. No (client IP, camera) pair is ever
+// logged; only aggregate per-source counters are kept (exposed coarsely by /api/health).
 
 /** Sources whose stills are fetched from an agency (demo-cam images are generated locally). */
 export type UpstreamCameraSource = Exclude<CameraSourceId, 'demo-cam'>
 
 export interface CctvSourcePolicy extends CachePolicy {
-  /** Per upstream request (BMA: the whole frame; DWR: each of the two steps). */
+  /** The whole upstream fetch (BMA: one request; DWR: both steps together). */
   timeoutMs: number
   /** Upstream requests running at once for this source. */
   maxInFlight: number
   /** Requests allowed to wait for a free slot; more are refused at once (503). */
   maxQueue: number
-  /** Longest wait for a free slot before refusing (503). */
+  /** Longest total wait for a slot (the client's own line, then the source queue) before refusing (503). */
   queueWaitMs: number
   /** Upstream frames per rolling hour. */
   hourlyBudget: number
@@ -36,6 +40,14 @@ export interface CctvSourcePolicy extends CachePolicy {
 }
 
 const MIN = 60_000
+
+/**
+ * Longest an image request may take on this server: queue wait + upstream fetch (each source's
+ * queueWaitMs + timeoutMs stays within it). The client watchdog (src/lib/ui/cctv.ts) must be
+ * longer, or a slow but successful frame is shown as unreachable while the server still pays
+ * for it.
+ */
+export const CCTV_SERVER_MAX_MS = 40_000
 
 export const CCTV_POLICY: Record<UpstreamCameraSource, CctvSourcePolicy> = {
   // BMA's /api/proxy grabs one frame from the camera's stream (~9 s of their work per frame).
@@ -46,7 +58,7 @@ export const CCTV_POLICY: Record<UpstreamCameraSource, CctvSourcePolicy> = {
     timeoutMs: 20_000,
     maxInFlight: 3,
     maxQueue: 20,
-    queueWaitMs: 25_000,
+    queueWaitMs: 15_000,
     hourlyBudget: 600,
     maxBytes: 2 * 1024 * 1024,
   },
@@ -55,14 +67,24 @@ export const CCTV_POLICY: Record<UpstreamCameraSource, CctvSourcePolicy> = {
     ttlMs: 5 * MIN,
     failTtlMs: 60_000,
     staleMaxMs: 60 * MIN,
-    timeoutMs: 15_000,
+    timeoutMs: 20_000,
     maxInFlight: 2,
     maxQueue: 10,
-    queueWaitMs: 25_000,
+    queueWaitMs: 15_000,
     hourlyBudget: 240,
     maxBytes: 2 * 1024 * 1024,
   },
 }
+
+/**
+ * Upstream fetches one client (IP, or IPv6 /64) may have going at once, running or waiting in a
+ * source queue, so one client cannot fill the shared queue. Its further cache misses wait in
+ * the client's own line (at most CLIENT_MAX_WAITING; more get 429).
+ */
+export const CLIENT_MAX_MISSES = 2
+export const CLIENT_MAX_WAITING = 6
+/** Retry-After (s) when a client's own line is full. */
+const CLIENT_LINE_RETRY_SEC = 15
 
 /** Suggested refresh interval of an open viewer (PublicCamera.refreshSec), seconds. */
 export const CCTV_REFRESH_SEC: Record<CameraSourceId, number> = {
@@ -87,6 +109,8 @@ export const CCTV_MSG = {
   unreachable: 'ติดต่อกล้องไม่ได้ในขณะนี้',
   noImage: 'หน่วยงานยังไม่มีภาพจากกล้องนี้',
   paused: 'ระบบพักการดึงภาพชั่วคราว',
+  limited: 'ขอภาพบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่',
+  unavailable: 'ขณะนี้เซิร์ฟเวอร์นี้แสดงภาพจากกล้องของหน่วยงานนี้ไม่ได้ ดูภาพได้ที่เว็บไซต์ของหน่วยงาน',
 } as const
 
 // --- frames -------------------------------------------------------------------------------------
@@ -104,17 +128,56 @@ export interface CctvFrame {
   height: number | null
 }
 
-/** Why an upstream frame could not be had. `busy`/`budget` mean upstream was not asked. */
-export type CctvFailure = 'unreachable' | 'no-image' | 'busy' | 'budget'
+/**
+ * Why an upstream frame could not be had. Upstream was not asked for `busy`/`budget` (shared
+ * queue or hourly budget), `limited` (this client's own miss limits) and `unavailable` (this
+ * server cannot fetch the source at the moment: host fallback or agency backoff).
+ */
+export type CctvFailure = 'unreachable' | 'no-image' | 'busy' | 'budget' | 'limited' | 'unavailable'
+
+/**
+ * What a failed fetch says about reaching the agency from this server:
+ * - `refused`: the host answered but turned this server away (HTTP 403, an HTML or challenge
+ *   page instead of an image);
+ * - `unreachable`: no answer at all (the fetch itself failed: DNS, TLS, connection refused);
+ * - `reached`: an ordinary answer (HTTP 5xx/404, a timeout, an odd body): the host is reachable
+ *   and the camera is the problem;
+ * - `unknown`: no request was made.
+ * Only `refused` and `unreachable` count toward the source-level fallbacks.
+ */
+export type HostSignal = 'refused' | 'unreachable' | 'reached' | 'unknown'
 
 export class FrameError extends Error {
+  host: HostSignal
+  status: number | null
+  /** The agency's Retry-After, ms. */
+  retryAfterMs: number | null
+
   constructor(
     public code: 'unreachable' | 'no-image',
     message: string,
+    opts: { host?: HostSignal; status?: number; retryAfterMs?: number | null } = {},
   ) {
     super(message)
     this.name = 'FrameError'
+    this.host = opts.host ?? 'reached'
+    this.status = opts.status ?? null
+    this.retryAfterMs = opts.retryAfterMs ?? null
   }
+}
+
+/** Retry-After as ms (delta seconds or an HTTP date), or null. */
+export function parseRetryAfterMs(v: string | null | undefined, now: number): number | null {
+  const s = v?.trim()
+  if (!s) return null
+  if (/^\d{1,9}$/.test(s)) return Number(s) * 1000
+  const at = Date.parse(s)
+  return Number.isFinite(at) ? Math.max(0, at - now) : null
+}
+
+/** A markup page (error page, Cloudflare challenge, geo block) where an image was expected. */
+function looksLikeHtml(bytes: Uint8Array): boolean {
+  return /^\s*</.test(new TextDecoder().decode(bytes.subarray(0, 64)))
 }
 
 /** JPEG files start with FF D8 FF. */
@@ -160,12 +223,15 @@ export function jpegSize(bytes: Uint8Array): { width: number; height: number } |
   return null
 }
 
-/** Read a response body, refusing (and cancelling) anything over `maxBytes`. */
+/**
+ * Read a response body, refusing (and cancelling) anything over `maxBytes`. An oversize markup
+ * page (a challenge page where a small JSON answer was expected) still counts as a refusal.
+ */
 async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> {
   const declared = Number(res.headers.get('content-length') ?? Number.NaN)
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => undefined)
-    throw new FrameError('unreachable', 'image too large')
+    throw new FrameError('unreachable', 'image too large', { host: /html/i.test(res.headers.get('content-type') ?? '') ? 'refused' : 'reached' })
   }
   if (!res.body) return new Uint8Array(0)
   const reader = res.body.getReader()
@@ -178,10 +244,14 @@ async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> 
       total += value.byteLength
       if (total > maxBytes) {
         await reader.cancel().catch(() => undefined)
-        throw new FrameError('unreachable', 'image too large')
+        throw new FrameError('unreachable', 'image too large', { host: looksLikeHtml(chunks[0] ?? value) ? 'refused' : 'reached' })
       }
       chunks.push(value)
     }
+  } catch (err) {
+    // A body cut off by the deadline or the connection: the host did answer.
+    if (err instanceof FrameError) throw err
+    throw new FrameError('unreachable', 'body read failed')
   } finally {
     reader.releaseLock()
   }
@@ -198,8 +268,9 @@ async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> 
 /** Validate an upstream image body: a complete JPEG within the size cap. */
 export function validateJpeg(bytes: Uint8Array): { bytes: Uint8Array; width: number | null; height: number | null } {
   if (bytes.byteLength === 0) throw new FrameError('unreachable', 'empty body')
-  // Cloudflare challenges, HTML error pages and PNG placeholders are never passed through.
-  if (!isJpeg(bytes)) throw new FrameError('unreachable', 'not a JPEG image')
+  // Cloudflare challenges, HTML error pages and PNG placeholders are never passed through. A
+  // markup page means this server was turned away; a placeholder image is the camera's problem.
+  if (!isJpeg(bytes)) throw new FrameError('unreachable', 'not a JPEG image', { host: looksLikeHtml(bytes) ? 'refused' : 'reached' })
   const trimmed = trimJpeg(bytes)
   if (!trimmed) throw new FrameError('unreachable', 'truncated JPEG')
   const size = jpegSize(trimmed)
@@ -227,7 +298,9 @@ function isPlausibleStreamRef(ref: string): boolean {
 
 // --- per-source gates, budgets and counters ----------------------------------------------------
 
-/** Concurrency gate with a bounded wait queue. */
+type Acquired = 'ok' | 'full' | 'timeout' | 'aborted'
+
+/** Concurrency gate with a bounded wait queue. A waiter leaves the queue when its request is aborted. */
 class Gate {
   active = 0
   private waiters: (() => void)[] = []
@@ -236,23 +309,35 @@ class Gate {
     return this.waiters.length
   }
 
-  acquire(max: number, maxQueue: number, waitMs: number): Promise<boolean> {
+  get idle(): boolean {
+    return this.active === 0 && this.waiters.length === 0
+  }
+
+  acquire(max: number, maxQueue: number, waitMs: number, signal?: AbortSignal): Promise<Acquired> {
+    if (signal?.aborted) return Promise.resolve('aborted')
     if (this.active < max) {
       this.active++
-      return Promise.resolve(true)
+      return Promise.resolve('ok')
     }
-    if (this.waiters.length >= maxQueue) return Promise.resolve(false)
-    return new Promise<boolean>((resolve) => {
-      const wake = () => {
+    if (this.waiters.length >= maxQueue) return Promise.resolve('full')
+    if (waitMs <= 0) return Promise.resolve('timeout')
+    return new Promise<Acquired>((resolve) => {
+      const settle = (r: Acquired) => {
         clearTimeout(timer)
-        resolve(true) // the releasing request handed its slot over; `active` is unchanged
+        signal?.removeEventListener('abort', onAbort)
+        resolve(r)
       }
-      const timer = setTimeout(() => {
+      const leave = (r: Acquired) => {
         const i = this.waiters.indexOf(wake)
-        if (i >= 0) this.waiters.splice(i, 1)
-        resolve(false)
-      }, waitMs)
+        if (i < 0) return // already handed a slot
+        this.waiters.splice(i, 1)
+        settle(r)
+      }
+      const wake = () => settle('ok') // the releasing request handed its slot over; `active` is unchanged
+      const onAbort = () => leave('aborted')
+      const timer = setTimeout(() => leave('timeout'), waitMs)
       timer.unref?.()
+      signal?.addEventListener('abort', onAbort, { once: true })
       this.waiters.push(wake)
     })
   }
@@ -282,6 +367,17 @@ class HourCounter {
   }
 }
 
+/** Why this server shows no stills for a source (the UI links to the agency page instead). */
+export type CctvImagesOff =
+  /** CCTV_IMAGES=0, or the source is not enabled. */
+  | 'disabled'
+  /** The catalogue came without image references (relayed or fetched by another host). */
+  | 'link-only'
+  /** This host never got a frame and keeps being turned away (e.g. a cloud host and Thai-IP-only images). */
+  | 'host-unreachable'
+  /** The agency answered 429 (or 403/503 with Retry-After, or kept answering 403): we pause. */
+  | 'agency-backoff'
+
 interface SourceState {
   gate: Gate
   /** Upstream frame attempts (what the hourly budget counts). */
@@ -291,31 +387,63 @@ interface SourceState {
   /** Requests refused by the concurrency queue or the hourly budget. */
   refused: HourCounter
   lastFrame: { width: number | null; height: number | null; bytes: number } | null
-  /** Host-level reachability: a host that never got a frame and keeps failing stops trying. */
+  /** This process has fetched a frame for the source. */
   everOk: boolean
-  unreachableStreak: number
-  downUntil: number
+  /** Host-level failures in a row (refused or unreachable), reset whenever the host answers normally. */
+  blockedStreak: number
+  /** HTTP 403 / HTML answers in a row (a WAF block), reset whenever the host answers normally. */
+  refusalStreak: number
+  /** No upstream requests for the source until then (epoch ms), for `offReason`. */
+  offUntil: number
+  offReason: 'host-unreachable' | 'agency-backoff' | null
+  /** Agency backoffs since the last good frame (doubles the pause when no Retry-After is given). */
+  backoffs: number
 }
 
 /**
- * A host that has never fetched a frame for a source and fails this many times in a row
- * treats the source as unreachable from here (e.g. a cloud server sharing a Supabase store
- * with the Thai worker, so it holds refs but cannot reach Thai-IP-only images) and shows
- * link-outs instead for SOURCE_DOWN_MS before trying again.
+ * A host that has never fetched a frame for a source and is turned away this many times in a
+ * row (network errors, HTTP 403, HTML pages; not timeouts or camera errors, which prove the
+ * host answers) treats the source as unreachable from here (e.g. a cloud server sharing a
+ * Supabase store with the Thai worker, so it holds refs but cannot reach Thai-IP-only images)
+ * and shows link-outs instead for SOURCE_DOWN_MS before trying again. On a host that has had
+ * frames, the same count of 403 / HTML answers starts an agency backoff instead (BMA answers a
+ * sporadic 403 even to Thai IPs, so one is not enough).
  */
 export const SOURCE_DOWN_AFTER = 3
 export const SOURCE_DOWN_MS = 30 * 60_000
+/** Agency backoff: Retry-After when given (clamped), else 10 → 20 → 40 → 60 min. */
+export const BACKOFF_MIN_MS = MIN
+export const BACKOFF_BASE_MS = 10 * MIN
+export const BACKOFF_MAX_MS = 60 * MIN
+
+/** How often memory is swept when no requests come in. */
+export const CCTV_SWEEP_MS = 60_000
+/** Frame hashes (frozen-camera detection) of cameras nobody has looked at for this long are forgotten. */
+export const HASH_MAX_AGE_MS = 2 * 60 * MIN
+
+/** Bump when CctvState or SourceState changes shape: a dev hot reload then starts afresh. */
+const STATE_VERSION = 2
+
+interface CctvState {
+  version: number
+  frames: ImageCache<CctvFrame>
+  hashes: Map<string, { hash: string; changedAt: number; seenAt: number }>
+  sources: Map<UpstreamCameraSource, SourceState>
+  /** Per-client lines for upstream misses (keyed by IP bucket; removed when idle). */
+  clients: Map<string, Gate>
+}
 
 interface CctvGlobal {
-  __floodCctv?: {
-    frames: ImageCache<CctvFrame>
-    hashes: Map<string, { hash: string; changedAt: number }>
-    sources: Map<UpstreamCameraSource, SourceState>
-  }
+  __floodCctv?: CctvState
+  __floodCctvSweep?: ReturnType<typeof setInterval>
+  __floodCctvWarningsLogged?: boolean
 }
 
 const g = globalThis as typeof globalThis & CctvGlobal
-const state = (g.__floodCctv ??= { frames: new ImageCache<CctvFrame>(MAX_FRAMES), hashes: new Map(), sources: new Map() })
+if (g.__floodCctv?.version !== STATE_VERSION) {
+  g.__floodCctv = { version: STATE_VERSION, frames: new ImageCache<CctvFrame>(MAX_FRAMES), hashes: new Map(), sources: new Map(), clients: new Map() }
+}
+const state: CctvState = g.__floodCctv
 
 function sourceState(source: UpstreamCameraSource): SourceState {
   let s = state.sources.get(source)
@@ -328,12 +456,20 @@ function sourceState(source: UpstreamCameraSource): SourceState {
       refused: new HourCounter(),
       lastFrame: null,
       everOk: false,
-      unreachableStreak: 0,
-      downUntil: 0,
+      blockedStreak: 0,
+      refusalStreak: 0,
+      offUntil: 0,
+      offReason: null,
+      backoffs: 0,
     }
     state.sources.set(source, s)
   }
   return s
+}
+
+/** Seconds until the source may be asked again, or null while it may be asked now. */
+function offFor(s: SourceState, t: number): number | null {
+  return s.offUntil > t ? Math.max(1, Math.ceil((s.offUntil - t) / 1000)) : null
 }
 
 /** Tests: forget every frame, hash, counter and queue. */
@@ -341,29 +477,55 @@ export function clearCctvCache(): void {
   state.frames.clear()
   state.hashes.clear()
   state.sources.clear()
+  state.clients.clear()
 }
+
+/**
+ * Drop frames at (or within `aheadMs` of) their stale limit and frame hashes older than
+ * HASH_MAX_AGE_MS. Runs on every image request (frames) and from an unref'd timer, so the
+ * retention promised on /about holds when nobody asks for images any more.
+ */
+export function sweepCctvMemory(t: number = Date.now(), aheadMs: number = CCTV_SWEEP_MS): void {
+  state.frames.prune(t, aheadMs)
+  for (const [id, h] of state.hashes) if (t - h.seenAt >= HASH_MAX_AGE_MS) state.hashes.delete(id)
+}
+
+/** (Re)start this process's periodic sweep. It never keeps the process alive. */
+export function startCctvSweeper(intervalMs: number = CCTV_SWEEP_MS): void {
+  if (g.__floodCctvSweep) clearInterval(g.__floodCctvSweep)
+  const timer = setInterval(() => sweepCctvMemory(Date.now(), intervalMs), intervalMs)
+  timer.unref?.()
+  g.__floodCctvSweep = timer
+}
+
+startCctvSweeper()
 
 export interface CctvSourceStats {
   source: UpstreamCameraSource
   /** Last hour: frames fetched, upstream failures, requests refused (busy or budget spent). */
   frames1h: { ok: number; fail: number; refused: number; budgetLeft: number }
+  /** Coarse budget state for public output: 'low' when under a quarter is left. */
+  budget: 'ok' | 'low' | 'spent'
   inFlight: number
   queued: number
   /** Size of the most recent frame (helps decide whether downscaling is needed). */
   lastFrame: { width: number | null; height: number | null; bytes: number } | null
 }
 
-/** Aggregate per-source counters for /api/health (no camera ids, no clients). */
+/** Aggregate per-source counters (no camera ids, no clients). */
 export function cctvImageStats(source: UpstreamCameraSource, now: number = Date.now()): CctvSourceStats {
   const s = sourceState(source)
+  const hourly = CCTV_POLICY[source].hourlyBudget
+  const budgetLeft = Math.max(0, hourly - s.attempts.total(now))
   return {
     source,
     frames1h: {
       ok: s.ok.total(now),
       fail: s.fail.total(now),
       refused: s.refused.total(now),
-      budgetLeft: Math.max(0, CCTV_POLICY[source].hourlyBudget - s.attempts.total(now)),
+      budgetLeft,
     },
+    budget: budgetLeft === 0 ? 'spent' : budgetLeft < hourly / 4 ? 'low' : 'ok',
     inFlight: s.gate.active,
     queued: s.gate.queued,
     lastFrame: s.lastFrame,
@@ -377,6 +539,16 @@ export interface CctvFetchDeps {
   now?: () => number
   /** PUBLIC_BASE_URL, for the honest User-Agent. */
   publicBaseUrl?: string
+  /**
+   * Rate-limit key of the requesting client (ipBucket of its IP). Its cache misses are
+   * counted (LIMITS.cctvMiss) and capped at CLIENT_MAX_MISSES at once. null/undefined when the
+   * IP is unknown (TRUST_PROXY=none): only the per-source limits apply.
+   */
+  client?: string | null
+  /** The client's request signal: an abandoned request leaves the queues at once. */
+  signal?: AbortSignal
+  /** Tests: the limiter holding the per-client miss buckets (default: this process's). */
+  limiter?: RateLimiter
   /** Tests: override parts of the source policy. */
   policy?: Partial<CctvSourcePolicy>
 }
@@ -386,14 +558,27 @@ function userAgent(publicBaseUrl: string | undefined): string {
   return `flood-monitor/0.1 (+${origin ? `${origin}/about` : 'https://github.com/chalaivate/flood-monitor'})`
 }
 
-async function upstream(fetchImpl: typeof fetch, url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function upstream(fetchImpl: typeof fetch, url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
   try {
     // No Referer / Origin: we say who we are in the User-Agent instead.
-    return await fetchImpl(url, { ...init, redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(timeoutMs) })
+    return await fetchImpl(url, { ...init, redirect: 'error', referrerPolicy: 'no-referrer', signal })
   } catch (err) {
-    const timeout = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
-    throw new FrameError('unreachable', timeout ? 'timeout' : 'network error')
+    // A timeout means a slow answer, not a blocked host: a blocked host fails fast (refused,
+    // reset, or undici's 10 s connect timeout, which is a TypeError). Anything else (DNS, TLS,
+    // refused, reset, a redirect) is a host-level failure.
+    const timeout = signal.aborted || (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError'))
+    throw new FrameError('unreachable', timeout ? 'timeout' : 'network error', { host: timeout ? 'reached' : 'unreachable' })
   }
+}
+
+/** Error for a non-OK upstream answer (drains the body). 403 means this server is turned away. */
+async function httpError(res: Response, now: number): Promise<FrameError> {
+  await res.body?.cancel().catch(() => undefined)
+  return new FrameError('unreachable', `HTTP ${res.status}`, {
+    host: res.status === 403 ? 'refused' : 'reached',
+    status: res.status,
+    retryAfterMs: parseRetryAfterMs(res.headers.get('retry-after'), now),
+  })
 }
 
 async function drain(res: Response): Promise<void> {
@@ -407,38 +592,39 @@ interface RawFrame {
   capturedAt: string | null
 }
 
-async function fetchBmaFrame(ref: string, policy: CctvSourcePolicy, deps: CctvFetchDeps): Promise<RawFrame> {
-  if (!isPlausibleStreamRef(ref)) throw new FrameError('unreachable', 'invalid reference')
+/**
+ * One frame. `signal` is the deadline for the whole fetch (policy.timeoutMs), so the server's
+ * worst case stays queue wait + timeoutMs (CCTV_SERVER_MAX_MS).
+ */
+type Fetcher = (ref: string, policy: CctvSourcePolicy, deps: CctvFetchDeps, signal: AbortSignal) => Promise<RawFrame>
+
+const fetchBmaFrame: Fetcher = async (ref, policy, deps, signal) => {
+  if (!isPlausibleStreamRef(ref)) throw new FrameError('unreachable', 'invalid reference', { host: 'unknown' })
   const url = `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}`
-  const res = await upstream(deps.fetch, url, { headers: { 'User-Agent': userAgent(deps.publicBaseUrl), Accept: 'image/jpeg' } }, policy.timeoutMs)
-  if (!res.ok) {
-    await drain(res)
-    throw new FrameError('unreachable', `HTTP ${res.status}`)
-  }
+  const res = await upstream(deps.fetch, url, { headers: { 'User-Agent': userAgent(deps.publicBaseUrl), Accept: 'image/jpeg' } }, signal)
+  if (!res.ok) throw await httpError(res, (deps.now ?? Date.now)())
   const frame = validateJpeg(await readCapped(res, policy.maxBytes))
   return { ...frame, capturedAt: null }
 }
 
-async function fetchDwrFrame(ref: string, policy: CctvSourcePolicy, deps: CctvFetchDeps): Promise<RawFrame> {
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(ref)) throw new FrameError('unreachable', 'invalid reference')
+const fetchDwrFrame: Fetcher = async (ref, policy, deps, signal) => {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(ref)) throw new FrameError('unreachable', 'invalid reference', { host: 'unknown' })
   const ua = userAgent(deps.publicBaseUrl)
+  const now = deps.now ?? Date.now
   // Step 1: the latest still's path, e.g. {"value":"/TA100220/2026/10/4/10_15.jpg"}.
-  const snap = await upstream(deps.fetch, `${DWR_API}/public/reportCctv/snapshot/${encodeURIComponent(ref)}`, { headers: { 'User-Agent': ua, Accept: 'application/json' } }, policy.timeoutMs)
+  const snap = await upstream(deps.fetch, `${DWR_API}/public/reportCctv/snapshot/${encodeURIComponent(ref)}`, { headers: { 'User-Agent': ua, Accept: 'application/json' } }, signal)
   if (snap.status === 404) {
     await drain(snap)
     throw new FrameError('no-image', 'no snapshot')
   }
-  if (!snap.ok) {
-    await drain(snap)
-    throw new FrameError('unreachable', `HTTP ${snap.status}`)
-  }
+  if (!snap.ok) throw await httpError(snap, now())
   let value: unknown
+  const raw = await readCapped(snap, MAX_JSON_BYTES)
   try {
-    const body = JSON.parse(new TextDecoder().decode(await readCapped(snap, MAX_JSON_BYTES))) as unknown
+    const body = JSON.parse(new TextDecoder().decode(raw)) as unknown
     value = body && typeof body === 'object' ? (body as { value?: unknown }).value : undefined
-  } catch (err) {
-    if (err instanceof FrameError) throw err
-    throw new FrameError('unreachable', 'unexpected snapshot response')
+  } catch {
+    throw new FrameError('unreachable', 'unexpected snapshot response', { host: looksLikeHtml(raw) ? 'refused' : 'reached' })
   }
   if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
     throw new FrameError('no-image', 'no snapshot')
@@ -446,79 +632,161 @@ async function fetchDwrFrame(ref: string, policy: CctvSourcePolicy, deps: CctvFe
   if (typeof value !== 'string' || !DWR_PATH_RE.test(value) || value.includes('..')) {
     throw new FrameError('unreachable', 'unexpected snapshot path')
   }
-  // Step 2: the JPEG itself (POST only).
+  // Step 2: the JPEG itself (POST only), within the same deadline as step 1.
   const img = await upstream(
     deps.fetch,
     `${DWR_API}/file/image/cctv`,
     { method: 'POST', headers: { 'User-Agent': ua, Accept: 'image/jpeg', 'Content-Type': 'application/json' }, body: JSON.stringify({ path: value }) },
-    policy.timeoutMs,
+    signal,
   )
   if (img.status === 404) {
     await drain(img)
     throw new FrameError('no-image', 'image not found')
   }
-  if (!img.ok) {
-    await drain(img)
-    throw new FrameError('unreachable', `HTTP ${img.status}`)
-  }
+  if (!img.ok) throw await httpError(img, now())
   const bytes = await readCapped(img, policy.maxBytes)
   if (bytes.byteLength === 0) throw new FrameError('no-image', 'empty image')
   return { ...validateJpeg(bytes), capturedAt: dwrCaptureTime(value) }
 }
 
-const FETCHERS: Record<UpstreamCameraSource, (ref: string, policy: CctvSourcePolicy, deps: CctvFetchDeps) => Promise<RawFrame>> = {
+const FETCHERS: Record<UpstreamCameraSource, Fetcher> = {
   'bma-floodcam': fetchBmaFrame,
   'dwr-cctv': fetchDwrFrame,
 }
 
 export type CctvImageOutcome =
   | { ok: true; frame: CctvFrame; stale: boolean; ttlMs: number }
-  | { ok: false; failure: CctvFailure }
+  /** `retryAfterSec` is set for 'limited' and 'unavailable'. */
+  | { ok: false; failure: CctvFailure; retryAfterSec?: number }
 
 export function isUpstreamCameraSource(s: string): s is UpstreamCameraSource {
   return s === 'bma-floodcam' || s === 'dwr-cctv'
 }
 
+/** Switch the source off from `t` for `ms` (logged once: failures while off are not counted). */
+function goOff(source: UpstreamCameraSource, s: SourceState, reason: 'host-unreachable' | 'agency-backoff', t: number, ms: number, why: string): void {
+  s.offUntil = t + ms
+  s.offReason = reason
+  s.blockedStreak = 0
+  s.refusalStreak = 0
+  const min = Math.max(1, Math.round(ms / 60_000))
+  log(
+    reason === 'host-unreachable'
+      ? `[cctv] ${source}: images unreachable from this server (${why}); showing agency links for ${min} min`
+      : `[cctv] ${source}: the agency is refusing image requests (${why}); pausing them for about ${min} min`,
+  )
+}
+
+/** Source-level bookkeeping for a failed upstream fetch (not called while the source is off). */
+function noteFailure(source: UpstreamCameraSource, s: SourceState, err: FrameError, t: number): void {
+  const explicit = err.status === 429 || (err.retryAfterMs !== null && (err.status === 403 || err.status === 503))
+  if (explicit) {
+    // The agency asked us to slow down: honour Retry-After (clamped), whatever this host's history.
+    const ms = err.retryAfterMs ?? Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** s.backoffs)
+    s.backoffs++
+    goOff(source, s, 'agency-backoff', t, Math.min(BACKOFF_MAX_MS, Math.max(BACKOFF_MIN_MS, ms)), `HTTP ${err.status}`)
+    return
+  }
+  if (err.host === 'reached') {
+    // The host answered: a camera-level failure says nothing about reaching it.
+    s.blockedStreak = 0
+    s.refusalStreak = 0
+    return
+  }
+  if (err.host !== 'refused' && err.host !== 'unreachable') return
+  s.blockedStreak++
+  if (err.host === 'refused') s.refusalStreak++
+  if (!s.everOk && s.blockedStreak >= SOURCE_DOWN_AFTER) {
+    goOff(source, s, 'host-unreachable', t, SOURCE_DOWN_MS, err.message)
+  } else if (s.everOk && s.refusalStreak >= SOURCE_DOWN_AFTER) {
+    const ms = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** s.backoffs)
+    s.backoffs++
+    goOff(source, s, 'agency-backoff', t, ms, `${err.message} ×${SOURCE_DOWN_AFTER}`)
+  }
+}
+
+function releaseClient(client: string, gate: Gate, acquired: boolean): void {
+  if (acquired) gate.release()
+  if (gate.idle && state.clients.get(client) === gate) state.clients.delete(client)
+}
+
 /**
  * Latest still of a camera whose reference has already been checked against the catalogue.
  * Shared cache → single-flight upstream fetch → stale fallback. Never throws.
+ *
+ * A request that would go upstream (a cache miss) is checked first: the source must not be
+ * off (host fallback / agency backoff), and a known client spends a token of its miss bucket
+ * and waits in its own line (CLIENT_MAX_MISSES at once) before it may join the source queue.
+ * The whole wait is bounded by queueWaitMs and ends early when `deps.signal` aborts. When a
+ * miss is refused, the last good frame is served if it is still young enough.
  */
 export async function getCctvImage(source: UpstreamCameraSource, cameraId: string, ref: string, deps: CctvFetchDeps): Promise<CctvImageOutcome> {
   const now = deps.now ?? Date.now
   const policy: CctvSourcePolicy = { ...CCTV_POLICY[source], ...deps.policy }
   const s = sourceState(source)
+  const deadline = now() + policy.queueWaitMs
+  const waitLeft = () => Math.max(0, deadline - now())
+  /** The last good frame while it may be served, else `failure`. */
+  const staleOr = (failure: CctvFailure, retryAfterSec?: number): CctvImageOutcome => {
+    const v = state.frames.peek(cameraId, policy, now()).value
+    if (v) return { ok: true, frame: v, stale: now() - v.fetchedAt >= policy.ttlMs, ttlMs: policy.ttlMs }
+    return retryAfterSec === undefined ? { ok: false, failure } : { ok: false, failure, retryAfterSec }
+  }
+
+  let line: { client: string; gate: Gate } | null = null
+  if (state.frames.peek(cameraId, policy, now()).wouldLoad) {
+    const off = offFor(s, now())
+    if (off !== null) return staleOr('unavailable', off)
+    if (deps.client) {
+      const token = (deps.limiter ?? rateLimiter()).take(`cctvMiss:${deps.client}`, LIMITS.cctvMiss)
+      if (!token.ok) return staleOr('limited', token.retryAfterSec)
+      const gate = state.clients.get(deps.client) ?? new Gate()
+      state.clients.set(deps.client, gate)
+      const got = await gate.acquire(CLIENT_MAX_MISSES, CLIENT_MAX_WAITING, waitLeft(), deps.signal)
+      if (got !== 'ok') {
+        releaseClient(deps.client, gate, false)
+        if (got === 'full') return staleOr('limited', CLIENT_LINE_RETRY_SEC)
+        if (got === 'timeout') s.refused.add(now())
+        return staleOr('busy')
+      }
+      line = { client: deps.client, gate }
+    }
+  }
 
   const load = async (): Promise<CctvFrame> => {
+    if (offFor(s, now()) !== null) throw new NotAttemptedError('unavailable')
     if (s.attempts.total(now()) >= policy.hourlyBudget) throw new NotAttemptedError('budget')
-    if (!(await s.gate.acquire(policy.maxInFlight, policy.maxQueue, policy.queueWaitMs))) throw new NotAttemptedError('busy')
+    const got = await s.gate.acquire(policy.maxInFlight, policy.maxQueue, waitLeft(), deps.signal)
+    if (got !== 'ok') throw new NotAttemptedError(got === 'aborted' ? 'aborted' : 'busy')
     try {
-      // The budget may have been spent while this request waited for a slot.
+      // The source may have gone off, or the budget been spent, while this request waited:
+      // requests queued behind the failures that switched the source off never go upstream.
+      if (offFor(s, now()) !== null) throw new NotAttemptedError('unavailable')
       if (s.attempts.total(now()) >= policy.hourlyBudget) throw new NotAttemptedError('budget')
       s.attempts.add(now())
       let raw: RawFrame
       try {
-        raw = await FETCHERS[source](ref, policy, deps)
+        raw = await FETCHERS[source](ref, policy, deps, AbortSignal.timeout(policy.timeoutMs))
       } catch (err) {
-        s.fail.add(now())
-        // A missing image from one camera says nothing about reaching the host.
-        if (!s.everOk && !(err instanceof FrameError && err.code === 'no-image') && ++s.unreachableStreak >= SOURCE_DOWN_AFTER) {
-          s.downUntil = now() + SOURCE_DOWN_MS
-          s.unreachableStreak = 0
-          log(`[cctv] ${source}: images unreachable from this server; showing agency links for ${SOURCE_DOWN_MS / 60_000} min`)
-        }
+        const t = now()
+        s.fail.add(t)
+        // Answers still arriving after the source went off are not counted again.
+        if (err instanceof FrameError && offFor(s, t) === null) noteFailure(source, s, err, t)
         throw err
       }
       const t = now()
       s.ok.add(t)
       s.everOk = true
-      s.unreachableStreak = 0
+      s.blockedStreak = 0
+      s.refusalStreak = 0
+      s.backoffs = 0
       if (!s.lastFrame) log(`[cctv] ${source}: first frame ${raw.width ?? '?'}×${raw.height ?? '?'} px, ${Math.round(raw.bytes.byteLength / 1024)} KB`)
       s.lastFrame = { width: raw.width, height: raw.height, bytes: raw.bytes.byteLength }
       const hash = createHash('sha1').update(raw.bytes).digest('hex')
       const seen = state.hashes.get(cameraId)
-      const changedAt = seen && seen.hash === hash ? seen.changedAt : t
+      const changedAt = seen && seen.hash === hash && t - seen.seenAt < HASH_MAX_AGE_MS ? seen.changedAt : t
       state.hashes.delete(cameraId)
-      state.hashes.set(cameraId, { hash, changedAt })
+      state.hashes.set(cameraId, { hash, changedAt, seenAt: t })
       if (state.hashes.size > MAX_HASHES) state.hashes.delete(state.hashes.keys().next().value!)
       return { bytes: raw.bytes, fetchedAt: t, capturedAt: raw.capturedAt, changedAt, width: raw.width, height: raw.height }
     } finally {
@@ -526,28 +794,55 @@ export async function getCctvImage(source: UpstreamCameraSource, cameraId: strin
     }
   }
 
-  const res = await state.frames.get(cameraId, policy, load, now)
-  if (res.ok) return { ok: true, frame: res.value, stale: res.stale, ttlMs: policy.ttlMs }
-  const err = res.error
-  if (err instanceof NotAttemptedError) {
-    s.refused.add(now())
-    return { ok: false, failure: err.reason === 'budget' ? 'budget' : 'busy' }
+  try {
+    const res = await state.frames.get(cameraId, policy, load, now)
+    if (res.ok) return { ok: true, frame: res.value, stale: res.stale, ttlMs: policy.ttlMs }
+    // The source is off (possibly because of this very answer): say so, not 'unreachable'.
+    const off = offFor(s, now())
+    if (off !== null) return { ok: false, failure: 'unavailable', retryAfterSec: off }
+    const err = res.error
+    if (err instanceof NotAttemptedError) {
+      if (err.reason !== 'aborted') s.refused.add(now()) // an abandoned request was not refused
+      return { ok: false, failure: err.reason === 'budget' ? 'budget' : 'busy' }
+    }
+    return { ok: false, failure: err instanceof FrameError ? err.code : 'unreachable' }
+  } finally {
+    if (line) releaseClient(line.client, line.gate, true)
   }
-  return { ok: false, failure: err instanceof FrameError ? err.code : 'unreachable' }
 }
 
 // --- request resolution -------------------------------------------------------------------------
 
+export interface CctvAvailability {
+  images: boolean
+  /** Why not (null while images is true). */
+  reason: CctvImagesOff | null
+  /** End of an automatic fallback (host-unreachable / agency-backoff), epoch ms; else null. */
+  until: number | null
+}
+
+/** Retry-After (s) for a source whose stills are off by configuration or catalogue (no end time). */
+const OFF_RETRY_SEC = 3600
+
 /**
- * True when this server shows stills for `source`: the source is enabled, CCTV_IMAGES=1 and
- * this host fetched the catalogue itself (holds the server-only references). Relayed or
- * cloud catalogues are link-only. demo-cam images are generated in DATA_MODE=fixture.
+ * Whether this server shows stills for `source` now, and why not: the source is enabled,
+ * CCTV_IMAGES=1, this host fetched the catalogue itself (holds the server-only references) and
+ * the source is not switched off by the host fallback or an agency backoff. Relayed or cloud
+ * catalogues are link-only. demo-cam images are generated in DATA_MODE=fixture.
  */
+export async function cctvImageAvailability(config: AppConfig, store: Store, source: CameraSourceId, now: number = Date.now()): Promise<CctvAvailability> {
+  const off = (reason: CctvImagesOff, until: number | null = null): CctvAvailability => ({ images: false, reason, until })
+  if (config.CCTV_IMAGES !== '1' || !config.enabledCameraSources.includes(source)) return off('disabled')
+  if (source === 'demo-cam') return config.DATA_MODE === 'fixture' ? { images: true, reason: null, until: null } : off('disabled')
+  const s = sourceState(source)
+  if (s.offUntil > now) return off(s.offReason ?? 'host-unreachable', s.offUntil)
+  if (!(await hasCameraRefs(store, source))) return off('link-only')
+  return { images: true, reason: null, until: null }
+}
+
+/** True when this server shows stills for `source` now (see cctvImageAvailability). */
 export async function canServeImages(config: AppConfig, store: Store, source: CameraSourceId, now: number = Date.now()): Promise<boolean> {
-  if (config.CCTV_IMAGES !== '1' || !config.enabledCameraSources.includes(source)) return false
-  if (source === 'demo-cam') return config.DATA_MODE === 'fixture'
-  if (sourceState(source).downUntil > now) return false
-  return hasCameraRefs(store, source)
+  return (await cctvImageAvailability(config, store, source, now)).images
 }
 
 export function cctvImageExt(source: CameraSourceId): 'svg' | 'jpg' {
@@ -566,25 +861,71 @@ export function parseCctvImageFile(source: CameraSourceId, file: string): string
   return m[1]!
 }
 
-export type ResolvedCamera = { camera: Camera; ref: string | null }
+export type CctvResolution =
+  | { kind: 'camera'; camera: Camera; ref: string | null }
+  /** Unknown source, malformed file name, or not in the current catalogue (404). */
+  | { kind: 'not-found' }
+  /** A listed camera whose stills this server cannot show right now (503, link to the agency). */
+  | { kind: 'unavailable'; retryAfterSec: number; reason: CctvImagesOff }
 
 /**
- * Checks made before anything else: the source serves images on this host, the file name is
- * well-formed, the camera is in the current catalogue and (for agency sources) we hold its
- * reference. null ⇒ 404, and no upstream request is made.
+ * Checks made before anything else, none of which asks upstream: the source is enabled, the
+ * file name is well-formed, the camera is in the current catalogue, this server shows stills
+ * for the source right now and (for agency sources) holds the camera's reference.
  */
-export async function resolveCctvCamera(config: AppConfig, store: Store, source: string, file: string): Promise<ResolvedCamera | null> {
-  if (!isCameraSourceId(source)) return null
-  if (!(await canServeImages(config, store, source))) return null
+export async function resolveCctvCamera(config: AppConfig, store: Store, source: string, file: string, now: number = Date.now()): Promise<CctvResolution> {
+  const notFound = { kind: 'not-found' } as const
+  if (!isCameraSourceId(source) || !config.enabledCameraSources.includes(source)) return notFound
   const nativeId = parseCctvImageFile(source, file)
-  if (!nativeId) return null
+  if (!nativeId) return notFound
   const [catalog] = await loadCameraCatalogs(store, [source])
   const camera = catalog?.cameras.find((c) => c.nativeId === nativeId && c.source === source)
-  if (!camera) return null
+  if (!camera) return notFound
+  const a = await cctvImageAvailability(config, store, source, now)
+  if (!a.images) {
+    const retryAfterSec = a.until !== null ? Math.max(1, Math.ceil((a.until - now) / 1000)) : OFF_RETRY_SEC
+    return { kind: 'unavailable', retryAfterSec, reason: a.reason ?? 'disabled' }
+  }
   const ref = await getCameraRef(store, camera.id)
   // demo-cam: the ref (when stored) names the simulated station that drives the picture.
-  if (source === 'demo-cam') return { camera, ref }
-  return ref ? { camera, ref } : null
+  if (source === 'demo-cam') return { kind: 'camera', camera, ref }
+  return ref ? { kind: 'camera', camera, ref } : notFound
+}
+
+/**
+ * Startup warnings when this server proxies agency stills: without a trusted client IP there
+ * are no per-client limits, and without CONTACT_EMAIL the /about takedown promise has no
+ * channel. Empty in fixture mode (generated demo images) and when stills are off.
+ */
+export function cctvConfigWarnings(config: AppConfig): string[] {
+  if (config.CCTV_IMAGES !== '1' || !config.enabledCameraSources.some(isUpstreamCameraSource)) return []
+  const out: string[] = []
+  if (config.TRUST_PROXY === 'none') {
+    out.push(
+      'camera stills are on but TRUST_PROXY=none: there are no per-client limits on image requests, so one visitor can use up ' +
+        "an agency source's hourly budget for everyone. Set TRUST_PROXY to the header your reverse proxy sets (cloudflare, xff), or CCTV_IMAGES=0",
+    )
+  }
+  const email = config.CONTACT_EMAIL?.trim()
+  if (!email || !/^[^\s@<>()"',;:]+@[^\s@<>()"',;:]+\.[^\s@<>()"',;:]+$/.test(email)) {
+    out.push(
+      'camera stills are on but CONTACT_EMAIL is not set to an e-mail address: /about promises to stop showing a camera on request ' +
+        'but offers no way to ask. Set CONTACT_EMAIL, or CCTV_IMAGES=0 to show agency links only',
+    )
+  }
+  return out
+}
+
+/** Log cctvConfigWarnings once per process. */
+export function logCctvConfigWarnings(config: AppConfig, logger: Logger = log): void {
+  if (g.__floodCctvWarningsLogged) return
+  g.__floodCctvWarningsLogged = true
+  for (const w of cctvConfigWarnings(config)) logger(`[cctv] WARNING: ${w}`)
+}
+
+/** Tests: allow logCctvConfigWarnings to log again. */
+export function __resetCctvWarningsForTests(): void {
+  g.__floodCctvWarningsLogged = undefined
 }
 
 // --- responses ----------------------------------------------------------------------------------
@@ -613,14 +954,26 @@ export function cctvFrameResponse(frame: CctvFrame, stale: boolean, ttlMs: numbe
   return new Response(frame.bytes as Uint8Array<ArrayBuffer>, { status: 200, headers })
 }
 
-/** HTTP status, Thai message and extra headers for a failed image request. */
-export function cctvFailure(failure: CctvFailure): { status: 502 | 503; message: string; headers: Record<string, string> } {
+/**
+ * HTTP status, Thai message and extra headers for a failed image request. The JSON body is
+ * `{ error: message, reason: failure }`:
+ * - 502 `unreachable` | `no-image`;
+ * - 503 `busy` | `budget` (+ Retry-After): the shared queue or hourly budget, try again later;
+ * - 503 `unavailable` (+ Retry-After): this server cannot fetch the source right now (host
+ *   fallback, agency backoff, stills switched off): the UI shows the agency link instead;
+ * - 429 `limited` (+ Retry-After, never cached by shared caches): this client's own limits.
+ */
+export function cctvFailure(failure: CctvFailure, retryAfterSec?: number): { status: 429 | 502 | 503; message: string; headers: Record<string, string> } {
   switch (failure) {
     case 'no-image':
       return { status: 502, message: CCTV_MSG.noImage, headers: {} }
     case 'busy':
     case 'budget':
       return { status: 503, message: CCTV_MSG.paused, headers: { 'Retry-After': failure === 'busy' ? '30' : '60' } }
+    case 'unavailable':
+      return { status: 503, message: CCTV_MSG.unavailable, headers: { 'Retry-After': String(retryAfterSec ?? 60) } }
+    case 'limited':
+      return { status: 429, message: CCTV_MSG.limited, headers: { 'Retry-After': String(retryAfterSec ?? 60), 'Cache-Control': 'no-store' } }
     default:
       return { status: 502, message: CCTV_MSG.unreachable, headers: {} }
   }

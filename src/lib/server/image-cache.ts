@@ -3,6 +3,8 @@
 // memory: never on disk, in the database or in logs. Concurrent requests for one key share a
 // single upstream fetch; failures are remembered briefly so a dead upstream is not hammered;
 // the last good value is served (marked stale) until it is too old, then it is dropped.
+// Dropping happens on every access and from prune(), which the owner also runs on a timer so
+// nothing outlives its stale limit when no further requests come.
 
 export interface CachePolicy {
   /** A value younger than this is served without asking upstream. */
@@ -76,7 +78,7 @@ export class ImageCache<T extends Timestamped> {
    * while it is younger than `staleMaxMs`.
    */
   async get(key: string, policy: CachePolicy, load: (prev: T | null) => Promise<T>, now: () => number = Date.now): Promise<CacheResult<T>> {
-    this.sweep(now())
+    this.prune(now())
     let entry = this.entries.get(key)
     if (entry) {
       this.entries.delete(key) // re-insert ⇒ Map order = least recently used first
@@ -123,11 +125,30 @@ export class ImageCache<T extends Timestamped> {
     return { ok: false, error: outcome ?? entry.error ?? new Error('unavailable') }
   }
 
-  /** Forget values older than their stale limit (nothing old lingers in memory). */
-  private sweep(t: number): void {
+  /**
+   * What get() would do for `key` at `t`, without loading anything. `wouldLoad`: a request now
+   * would start an upstream fetch (no fresh value, no fetch running, no recent failure).
+   * `value`: the last good value while it may still be served (younger than staleMaxMs).
+   */
+  peek(key: string, policy: CachePolicy, t: number): { wouldLoad: boolean; value: T | null } {
+    this.prune(t)
+    const e = this.entries.get(key)
+    if (!e) return { wouldLoad: true, value: null }
+    const age = e.value ? t - e.value.fetchedAt : Number.POSITIVE_INFINITY
+    const recentlyFailed = e.error !== null && t - e.checkedAt < policy.failTtlMs
+    return { wouldLoad: age >= policy.ttlMs && !e.inflight && !recentlyFailed, value: age < policy.staleMaxMs ? e.value : null }
+  }
+
+  /**
+   * Forget values that are older than their stale limit at `t + aheadMs` (a periodic sweep
+   * passes its interval, so nothing outlives the limit between two sweeps), and entries left
+   * with neither a value nor a recent failure. A value is dropped even while a fetch for the
+   * key is running; the entry itself is kept for that fetch's waiters.
+   */
+  prune(t: number, aheadMs = 0): void {
     for (const [key, e] of this.entries) {
+      if (e.value && t + aheadMs - e.value.fetchedAt >= e.staleMaxMs) e.value = null
       if (e.inflight) continue
-      if (e.value && t - e.value.fetchedAt >= e.staleMaxMs) e.value = null
       if (!e.value && (e.error === null || t - e.checkedAt >= e.failTtlMs)) this.entries.delete(key)
     }
   }

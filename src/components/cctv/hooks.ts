@@ -4,17 +4,24 @@ import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore, type
 import { fetchCameras, type CamerasResponse } from '@/lib/ui/api'
 import {
   CAMERA_LIST_REFRESH_MS,
+  UNAVAILABLE_MIN_RETRY_SEC,
   WATCHDOG_MS,
   WATCHDOG_REASON,
+  activeHold,
   cardQuery,
   frameUrl,
+  isLinkOnlyFailure,
+  listReloadGate,
   loadFrame,
   nextAttemptDelay,
+  noteRetryHold,
   readPaused,
+  reloadDelay,
   writePaused,
   type FrameDeps,
   type FrameFailure,
   type FrameMeta,
+  type RetryHolds,
 } from '@/lib/ui/cctv'
 import { usePolled, type Polled } from '@/lib/ui/hooks'
 
@@ -109,12 +116,45 @@ export function useOnScreen(ref: RefObject<Element | null>, rootMargin = '100px'
   return on
 }
 
+// --- camera list reload (a still turned link-only) ------------------------------------------------
+
+const listReloadListeners = new Set<() => void>()
+const listReloadAllowed = listReloadGate()
+
+/**
+ * A still answered "link-only now" (503 unavailable / 404): ask every camera list on the page
+ * (dashboard card, map layer, Chao Phraya chain) to reload, so tiles and markers switch to
+ * agency links instead of waiting for the 30-minute refresh. Coalesced: tiles fail together.
+ */
+export function requestCameraListReload(): void {
+  if (!listReloadAllowed(Date.now())) return
+  for (const l of [...listReloadListeners]) l()
+}
+
+export function subscribeCameraListReload(cb: () => void): () => void {
+  listReloadListeners.add(cb)
+  return () => {
+    listReloadListeners.delete(cb)
+  }
+}
+
+/** Calls `reload` (e.g. usePolled's refresh) whenever a still turned link-only. */
+export function useCameraListReload(reload: () => void): void {
+  const latest = useRef(reload)
+  useEffect(() => {
+    latest.current = reload
+  })
+  useEffect(() => subscribeCameraListReload(() => latest.current()), [])
+}
+
 // --- camera list for the dashboard card -----------------------------------------------------
 
-/** Cameras around a place: loaded once per place, then every 30 minutes. */
+/** Cameras around a place: loaded once per place, then every 30 minutes (and when a still turns link-only). */
 export function useNearbyCameras(p: { lat: number; lng: number; radiusKm: number } | null): Polled<CamerasResponse> {
   const key = p ? `cctv:${p.lat.toFixed(5)},${p.lng.toFixed(5)},${p.radiusKm}` : null
-  return usePolled<CamerasResponse>(key, (signal) => fetchCameras(p ? cardQuery(p) : null, { signal }), CAMERA_LIST_REFRESH_MS)
+  const polled = usePolled<CamerasResponse>(key, (signal) => fetchCameras(p ? cardQuery(p) : null, { signal }), CAMERA_LIST_REFRESH_MS)
+  useCameraListReload(polled.refresh)
+  return polled
 }
 
 // --- one camera's still -------------------------------------------------------------------------
@@ -129,6 +169,9 @@ export interface FrameState {
 }
 
 const EMPTY: FrameState = { src: null, meta: null, loading: false, failure: null }
+
+/** Retry-After holds of this page (every tile and the viewer honour them). */
+const holds: RetryHolds = new Map()
 
 function browserDeps(): FrameDeps {
   return {
@@ -166,9 +209,13 @@ function clearTimer(t: RefObject<ReturnType<typeof setTimeout> | null>) {
 
 /**
  * Load a camera's still and keep it fresh. One request at a time (the next is scheduled when the
- * previous finishes, with a 25 s watchdog); the new still replaces the old one only after it has
- * decoded, and the old object URL is revoked once the new one is on screen. Unmounting (or
- * switching camera, which remounts) aborts the request in flight.
+ * previous finishes, with a 50 s watchdog); the new still replaces the old one only after it has
+ * decoded, and the old object URL is revoked once the new one is on screen. A new `imageUrl`
+ * (another angle, or the camera turned link-only: null) aborts the request in flight and drops
+ * the old still. Retry-After (429 limited, 503 busy/budget/unavailable) delays the next
+ * automatic attempt and a manual reload, and holds every other still it applies to (the whole
+ * client for 429, the source for 503). "unavailable" (link-only for now) also reloads the
+ * camera list and stops automatic attempts for at least UNAVAILABLE_MIN_RETRY_SEC.
  */
 export function useCameraFrame(imageUrl: string | null, opts: FrameOptions): FrameState & { reload: () => void } {
   const [state, setState] = useState<FrameState>(EMPTY)
@@ -178,6 +225,8 @@ export function useCameraFrame(imageUrl: string | null, opts: FrameOptions): Fra
   const finishedAt = useRef<number | null>(null)
   const retryAfter = useRef<number | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** A manual reload waiting out Retry-After. */
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const auto = useRef(opts.auto)
   const interval = useRef(opts.intervalMs)
 
@@ -191,6 +240,14 @@ export function useCameraFrame(imageUrl: string | null, opts: FrameOptions): Fra
   const run = useEffectEvent(async () => {
     if (!imageUrl || inflight.current) return
     clearTimer(timer)
+    clearTimer(reloadTimer)
+    // The server asked this client (or everyone, for this source) to wait: show why, ask later.
+    const held = activeHold(holds, imageUrl, Date.now())
+    if (held) {
+      setState((s) => ({ ...s, loading: false, failure: held.failure }))
+      timer.current = setTimeout(() => setDue((n) => n + 1), held.waitMs)
+      return
+    }
     const ctrl = new AbortController()
     inflight.current = ctrl
     const watchdog = setTimeout(() => ctrl.abort(WATCHDOG_REASON), WATCHDOG_MS)
@@ -205,8 +262,11 @@ export function useCameraFrame(imageUrl: string | null, opts: FrameOptions): Fra
         retryAfter.current = null
         setState({ src: out.src, meta: out.meta, loading: false, failure: null })
       } else {
-        retryAfter.current = out.retryAfterSec
+        const linkOnly = isLinkOnlyFailure(out.failure)
+        noteRetryHold(holds, out.failure, imageUrl, out.retryAfterSec, Date.now())
+        retryAfter.current = linkOnly ? Math.max(out.retryAfterSec ?? 0, UNAVAILABLE_MIN_RETRY_SEC) : out.retryAfterSec
         setState((s) => ({ ...s, loading: false, failure: out.failure }))
+        if (linkOnly) requestCameraListReload()
       }
     } catch {
       // Aborted by unmount / camera switch: nothing to update.
@@ -227,14 +287,20 @@ export function useCameraFrame(imageUrl: string | null, opts: FrameOptions): Fra
     }
   }, [state.src])
 
-  // Abort the request in flight on unmount / camera change.
+  // On unmount / camera change: abort the request in flight and forget the old still (a camera
+  // that turned link-only must not keep showing its last picture, undimmed and unlabelled).
   useEffect(() => {
     const flight = inflight
     const t = timer
+    const r = reloadTimer
     return () => {
       flight.current?.abort()
       flight.current = null
       clearTimer(t)
+      clearTimer(r)
+      finishedAt.current = null
+      retryAfter.current = null
+      setState(EMPTY)
     }
   }, [imageUrl])
 
@@ -258,5 +324,11 @@ export function useCameraFrame(imageUrl: string | null, opts: FrameOptions): Fra
     return () => clearTimeout(t)
   }, [due])
 
-  return { ...state, reload: () => setDue((n) => n + 1) }
+  const reload = () => {
+    clearTimer(reloadTimer)
+    const wait = reloadDelay(finishedAt.current, retryAfter.current, Date.now())
+    if (wait <= 0) setDue((n) => n + 1)
+    else reloadTimer.current = setTimeout(() => setDue((n) => n + 1), wait)
+  }
+  return { ...state, reload }
 }

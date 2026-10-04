@@ -306,6 +306,37 @@ describe('DWR telemetry river cameras', () => {
     expect(banned.calls).toHaveLength(3) // list + TA100220 + TA100221, then stop
   })
 
+  it('keeps the last known position of a station whose lookup fails or gives none; never takes positions from another source', async () => {
+    const first = await fetchDwrCatalog({ fetch: stubFetch(routes()).fetch, now: NOW, timeoutMs: 1000, sleep: noSleep })
+    const previous = { source: first.source, fetchedAt: first.fetchedAt, cameras: first.cameras }
+    const flaky = stubFetch(routes({ TA100220: () => new Response('oops', { status: 502 }), TC100224: () => Response.json({ value: {} }) }))
+    const res = await fetchDwrCatalog({ fetch: flaky.fetch, now: NOW, timeoutMs: 1000, sleep: noSleep, previous })
+    expect(res.cameras.map((c) => c.nativeId)).toEqual(['TA100220', 'TA100221', 'TC100224', 'TA100218', 'TA130202', 'TA100219'])
+    expect(res.cameras[0]).toEqual(first.cameras[0])
+    expect(res.refs).toEqual(first.refs)
+    expect(res.warnings).toContain('kept the last known position of 2 camera(s) (station lookup failed or gave none)')
+    expect(res.warnings.join(' ')).not.toMatch(/lookup failed for/)
+
+    // A previous list of another source (or with odd rows) is ignored.
+    const foreign = { ...previous, source: 'bma-floodcam' as const }
+    const odd = { ...previous, cameras: previous.cameras.map((c) => ({ ...c, lat: 51.5 })) }
+    for (const prev of [foreign, odd]) {
+      const r = await fetchDwrCatalog({ fetch: flaky.fetch, now: NOW, timeoutMs: 1000, sleep: noSleep, previous: prev })
+      expect(r.cameras.map((c) => c.nativeId)).not.toContain('TA100220')
+    }
+  })
+
+  it('fails the refresh when more lookups fail than a few (no known position), keeping the last good list', async () => {
+    const down = stubFetch(routes({ TA100220: () => new Response('', { status: 503 }), TA100221: () => new Response('', { status: 503 }), TC100224: () => new Response('', { status: 503 }) }))
+    await expect(fetchDwrCatalog({ fetch: down.fetch, now: NOW, timeoutMs: 1000, sleep: noSleep })).rejects.toThrow(
+      'DWR camera list: station lookup failed for 3 of 6 camera(s); kept the previous list',
+    )
+    // With their last known positions, the same outage is a complete list.
+    const first = await fetchDwrCatalog({ fetch: stubFetch(routes()).fetch, now: NOW, timeoutMs: 1000, sleep: noSleep })
+    const res = await fetchDwrCatalog({ fetch: down.fetch, now: NOW, timeoutMs: 1000, sleep: noSleep, previous: first })
+    expect(res.cameras).toHaveLength(6)
+  })
+
   it('reads further pages until totalCount', async () => {
     const page1 = { value: { totalCount: 201, results: Array.from({ length: 200 }, (_, i) => ({ entity: { id: `p1-${i}`, stationCode: `TX${i}` }, provinceNameTh: 'เชียงใหม่' })) } }
     const page2 = structuredClone(list)

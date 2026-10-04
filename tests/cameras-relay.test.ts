@@ -2,16 +2,24 @@ import { readFileSync } from 'node:fs'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cameraCatalogHealth, getCameraRef, hasCameraRefs, loadCameraCatalogs, saveCameraCatalog } from '@/lib/cameras/catalog'
 import { loadConfig, resetConfigCache } from '@/lib/config'
-import { createRelayCameraState, parseRelayCameraState, runPollCycle, runRelayCycle, serializeRelayCameraState, summarize } from '@/lib/server/poller'
+import {
+  createRelayCameraState,
+  parseRelayCameraState,
+  RELAY_CAMERA_MAX_UNCONFIRMED,
+  runPollCycle,
+  runRelayCycle,
+  serializeRelayCameraState,
+  summarize,
+} from '@/lib/server/poller'
 import { IngestPayloadSchema, parseRelayCameraCatalog } from '@/lib/server/validation'
 import { parseBmaRoadFlood } from '@/lib/sources/bma-misc'
 import { parseBmaCameraProfile } from '@/lib/sources/cameras/bma-floodcam'
-import type { CameraCatalogAdapter } from '@/lib/sources/cameras/types'
+import type { CameraCatalogAdapter, CameraCatalogContext } from '@/lib/sources/cameras/types'
 import { DEMO_SOURCES } from '@/lib/sources/demo'
 import type { SourceAdapter } from '@/lib/sources/types'
 import { __setStoreForTests } from '@/lib/store'
 import { SqliteStore } from '@/lib/store/sqlite'
-import type { CameraCatalogResult } from '@/lib/types'
+import type { CameraCatalog, CameraCatalogResult } from '@/lib/types'
 
 import * as ingestRoute from '@/app/api/ingest/route'
 
@@ -34,7 +42,7 @@ function cameraAdapter(make: (n: number, now: Date) => CameraCatalogResult | Err
     thaiIpOnly: true,
     refreshHours: 24,
     calls: 0,
-    async fetchCatalog(ctx: { now: Date }) {
+    async fetchCatalog(ctx: CameraCatalogContext) {
       a.calls++
       const r = make(a.calls, ctx.now)
       if (r instanceof Error) throw r
@@ -59,41 +67,92 @@ interface Post {
   raw: string
 }
 
-function ingestStub(status: (n: number) => number = () => 200, answer: unknown = { inserted: 1 }) {
+type Answer = (body: Record<string, unknown>, n: number) => unknown
+
+/** By default the server saves every list it gets (as POST /api/ingest answers). */
+const savesAll: Answer = (body) => ({
+  inserted: 1,
+  cameras: ((body.cameraCatalogs as { source: string; cameras: unknown[] }[] | undefined) ?? []).map((c) => ({ source: c.source, saved: true, count: c.cameras.length, warning: null })),
+})
+
+function ingestStub(status: (n: number) => number = () => 200, answer: Answer = savesAll) {
   const posts: Post[] = []
   const f = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const raw = String(init?.body)
-    posts.push({ url: String(input), body: JSON.parse(raw), raw })
+    const body = JSON.parse(raw) as Record<string, unknown>
+    posts.push({ url: String(input), body, raw })
     const s = status(posts.length)
-    return s === 200 ? Response.json(answer) : new Response('bad gateway', { status: s })
+    return s === 200 ? Response.json(answer(body, posts.length)) : new Response('bad gateway', { status: s })
   }) as typeof fetch
-  return { fetch: f, posts }
+  return {
+    fetch: f,
+    posts,
+    /** The camera POSTs only (readings POSTs never carry camera lists). */
+    cameraPosts: () => posts.filter((p) => 'cameraCatalogs' in p.body || 'cameraFailures' in p.body),
+  }
 }
 
 const relayBase = { baseUrl: 'https://flood.example.org', token: 'tok', config: loadConfig({}), sources: [roadSource], log: () => {}, sleep: async () => {} }
 
+/** Answers every camera list with the same verdict. */
+const answerAll = (verdict: Record<string, unknown>): Answer => (body) => ({
+  inserted: 0,
+  cameras: ((body.cameraCatalogs as { source: string }[] | undefined) ?? []).map((c) => ({ source: c.source, saved: false, count: 0, ...verdict })),
+})
+
 describe('runRelayCycle with camera lists', () => {
-  it('pushes the list when due, public fields only, and not again until the next period', async () => {
+  it('pushes the list when due, after the readings in a POST of its own, public fields only, and not again until the next period', async () => {
     const cams = cameraAdapter((_n, now) => bmaList(now))
     const state = createRelayCameraState()
     const { fetch, posts } = ingestStub()
     const s1 = await runRelayCycle({ ...relayBase, fetch, now: () => T0, cameraSources: [cams], cameraState: state })
     expect(s1.ok).toBe(true)
     expect(s1.cameras).toEqual([{ source: 'bma-floodcam', ok: true, count: 17 }])
-    const catalogs = posts[0]!.body.cameraCatalogs as { source: string; fetchedAt: string; cameras: unknown[] }[]
+    expect(posts).toHaveLength(2)
+    // Readings first, without camera lists…
+    expect(posts[0]!.body.results).toHaveLength(1)
+    expect(posts[0]!.body.cameraCatalogs).toBeUndefined()
+    // …then the camera list alone (no readings, so the server runs no alerts for it).
+    expect(posts[1]!.body.results).toEqual([])
+    const catalogs = posts[1]!.body.cameraCatalogs as { source: string; fetchedAt: string; cameras: unknown[] }[]
     expect(catalogs).toHaveLength(1)
     expect(catalogs[0]!.source).toBe('bma-floodcam')
     expect(catalogs[0]!.cameras).toHaveLength(17)
     // Never refs, stream addresses or upstream fields.
-    for (const needle of ['refs', 'rtsp:', 'example.invalid/cam', 'LiveStream', 'fixture-secret', '10.0.0.9']) expect(posts[0]!.raw).not.toContain(needle)
-    expect(posts[0]!.body.results).toHaveLength(1) // readings still relayed
+    for (const p of posts) for (const needle of ['refs', 'rtsp:', 'example.invalid/cam', 'LiveStream', 'fixture-secret', '10.0.0.9']) expect(p.raw).not.toContain(needle)
 
     await runRelayCycle({ ...relayBase, fetch, now: () => at(1), cameraSources: [cams], cameraState: state })
-    expect(posts[1]!.body.cameraCatalogs).toBeUndefined()
+    expect(posts).toHaveLength(3) // readings only
     expect(cams.calls).toBe(1)
     await runRelayCycle({ ...relayBase, fetch, now: () => at(24), cameraSources: [cams], cameraState: state })
     expect(cams.calls).toBe(2)
-    expect(posts[2]!.body.cameraCatalogs).toHaveLength(1)
+    expect(posts).toHaveLength(5)
+    expect(posts[4]!.body.cameraCatalogs).toHaveLength(1)
+  })
+
+  it('the readings POST (and so the server alerts) never waits for a slow camera list', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let listDone = false
+    const slow = cameraAdapter((_n, now) => bmaList(now))
+    const fetchList = slow.fetchCatalog
+    slow.fetchCatalog = async (ctx) => {
+      await gate
+      const r = await fetchList(ctx)
+      listDone = true
+      return r
+    }
+    const { fetch, posts } = ingestStub()
+    const cycle = runRelayCycle({ ...relayBase, fetch, now: () => T0, cameraSources: [slow], cameraState: createRelayCameraState() })
+    await vi.waitFor(() => expect(posts).toHaveLength(1))
+    expect(listDone).toBe(false)
+    expect(posts[0]!.body.results).toHaveLength(1)
+    expect(posts[0]!.body.cameraCatalogs).toBeUndefined()
+    release()
+    const s = await cycle
+    expect(s.ok).toBe(true)
+    expect(posts).toHaveLength(2)
+    expect((posts[1]!.body.cameraCatalogs as unknown[]).length).toBe(1)
   })
 
   it('re-sends a list the server has not accepted yet, without refetching it', async () => {
@@ -102,29 +161,159 @@ describe('runRelayCycle with camera lists', () => {
     const down = ingestStub(() => 401)
     const s1 = await runRelayCycle({ ...relayBase, fetch: down.fetch, now: () => T0, cameraSources: [cams], cameraState: state })
     expect(s1.ok).toBe(false)
+    expect(down.posts).toHaveLength(1) // no camera POST while the server refuses the readings
     const up = ingestStub()
     await runRelayCycle({ ...relayBase, fetch: up.fetch, now: () => at(0.2), cameraSources: [cams], cameraState: state })
     expect(cams.calls).toBe(1)
-    expect((up.posts[0]!.body.cameraCatalogs as unknown[]).length).toBe(1)
+    expect(up.cameraPosts()).toHaveLength(1)
+    expect((up.cameraPosts()[0]!.body.cameraCatalogs as unknown[]).length).toBe(1)
     await runRelayCycle({ ...relayBase, fetch: up.fetch, now: () => at(0.4), cameraSources: [cams], cameraState: state })
-    expect(up.posts[1]!.body.cameraCatalogs).toBeUndefined()
+    expect(up.cameraPosts()).toHaveLength(1)
+  })
+
+  it('a list the server could not store is sent again next cycle, and forgotten once saved', async () => {
+    const cams = cameraAdapter((_n, now) => bmaList(now))
+    const state = createRelayCameraState()
+    const logs: string[] = []
+    let failStore = true
+    const stub = ingestStub(
+      () => 200,
+      (body, n) => (failStore && 'cameraCatalogs' in body ? (failStore = false, answerAll({ warning: 'store failed: fetch failed (supabase)', retry: true })(body, n)) : savesAll(body, n)),
+    )
+    await runRelayCycle({ ...relayBase, log: (m) => logs.push(m), fetch: stub.fetch, now: () => T0, cameraSources: [cams], cameraState: state })
+    expect(logs.join('\n')).toContain('server did not confirm the bma-floodcam camera list: store failed: fetch failed (supabase); sending it again next cycle')
+    // Still owed to the server: an --once schedule would refetch it.
+    expect(JSON.parse(serializeRelayCameraState(state))['bma-floodcam'].lastSuccessAt).toBeNull()
+    await runRelayCycle({ ...relayBase, fetch: stub.fetch, now: () => at(0.2), cameraSources: [cams], cameraState: state })
+    expect(cams.calls).toBe(1)
+    expect(stub.cameraPosts()).toHaveLength(2) // re-sent, not refetched
+    await runRelayCycle({ ...relayBase, fetch: stub.fetch, now: () => at(0.4), cameraSources: [cams], cameraState: state })
+    expect(stub.cameraPosts()).toHaveLength(2) // saved: forgotten until the next period
+    expect(JSON.parse(serializeRelayCameraState(state))['bma-floodcam'].lastSuccessAt).toBe(T0.toISOString())
+  })
+
+  it('an unreadable or missing answer counts as unconfirmed; after a few tries the list is refetched with backoff', async () => {
+    const cams = cameraAdapter((_n, now) => bmaList(now))
+    const state = createRelayCameraState()
+    const stub = ingestStub(() => 200, (body) => ('cameraCatalogs' in body ? { inserted: 0, cameras: [] } : { inserted: 1 }))
+    for (let i = 0; i < RELAY_CAMERA_MAX_UNCONFIRMED; i++) {
+      await runRelayCycle({ ...relayBase, fetch: stub.fetch, now: () => at(i * 0.1), cameraSources: [cams], cameraState: state })
+    }
+    expect(cams.calls).toBe(1)
+    expect(stub.cameraPosts()).toHaveLength(RELAY_CAMERA_MAX_UNCONFIRMED)
+    const t = (RELAY_CAMERA_MAX_UNCONFIRMED - 1) * 0.1
+    // Given up: no resend, and a new fetch only after the 1 h backoff.
+    await runRelayCycle({ ...relayBase, fetch: stub.fetch, now: () => at(t + 0.5), cameraSources: [cams], cameraState: state })
+    expect(stub.cameraPosts()).toHaveLength(RELAY_CAMERA_MAX_UNCONFIRMED)
+    expect(cams.calls).toBe(1)
+    await runRelayCycle({ ...relayBase, fetch: stub.fetch, now: () => at(t + 1), cameraSources: [cams], cameraState: state })
+    expect(cams.calls).toBe(2)
+  })
+
+  it('a list refused as too small is fetched again with backoff (so the server sees it come back); other refusals wait for the next period', async () => {
+    const cams = cameraAdapter((_n, now) => bmaList(now))
+    const state = createRelayCameraState()
+    const logs: string[] = []
+    const shrink = ingestStub(() => 200, answerAll({ reason: 'shrink', warning: 'bma-floodcam: only 8 of 20 cameras (< 50%); kept the previous list' }))
+    await runRelayCycle({ ...relayBase, log: (m) => logs.push(m), fetch: shrink.fetch, now: () => T0, cameraSources: [cams], cameraState: state })
+    expect(logs.join('\n')).toContain('server kept its bma-floodcam camera list: bma-floodcam: only 8 of 20 cameras')
+    await runRelayCycle({ ...relayBase, fetch: shrink.fetch, now: () => at(0.5), cameraSources: [cams], cameraState: state })
+    expect(cams.calls).toBe(1)
+    expect(shrink.cameraPosts()).toHaveLength(1)
+    await runRelayCycle({ ...relayBase, fetch: shrink.fetch, now: () => at(1), cameraSources: [cams], cameraState: state })
+    expect(cams.calls).toBe(2)
+    expect(shrink.cameraPosts()).toHaveLength(2)
+    // Refused again: the next try waits longer (2 h, then 4 h …), not every hour.
+    await runRelayCycle({ ...relayBase, fetch: shrink.fetch, now: () => at(2.5), cameraSources: [cams], cameraState: state })
+    expect(cams.calls).toBe(2)
+    await runRelayCycle({ ...relayBase, fetch: shrink.fetch, now: () => at(3), cameraSources: [cams], cameraState: state })
+    expect(cams.calls).toBe(3)
+
+    // The server fetched its own list: nothing to resend or refetch before the next period.
+    const other = createRelayCameraState()
+    const fresh = ingestStub(() => 200, answerAll({ reason: 'local-fresh', warning: 'bma-floodcam: relayed list ignored; this server fetched its own list' }))
+    const own = cameraAdapter((_n, now) => bmaList(now))
+    await runRelayCycle({ ...relayBase, fetch: fresh.fetch, now: () => T0, cameraSources: [own], cameraState: other })
+    await runRelayCycle({ ...relayBase, fetch: fresh.fetch, now: () => at(2), cameraSources: [own], cameraState: other })
+    expect(own.calls).toBe(1)
+    expect(fresh.cameraPosts()).toHaveLength(1)
+  })
+
+  it('a server without camera support (no `cameras` in its answer) is not sent the list again', async () => {
+    const cams = cameraAdapter((_n, now) => bmaList(now))
+    const state = createRelayCameraState()
+    const old = ingestStub(() => 200, () => ({ inserted: 1 }))
+    await runRelayCycle({ ...relayBase, fetch: old.fetch, now: () => T0, cameraSources: [cams], cameraState: state })
+    await runRelayCycle({ ...relayBase, fetch: old.fetch, now: () => at(0.2), cameraSources: [cams], cameraState: state })
+    expect(old.cameraPosts()).toHaveLength(1)
+    expect(cams.calls).toBe(1)
   })
 
   it('reports a failed camera list (redacted) and retries it with backoff; readings are unaffected', async () => {
     const cams = cameraAdapter(() => new Error('connect to rtsp://admin:x@cam.dyndns.invalid/1 failed'))
     const state = createRelayCameraState()
     const logs: string[] = []
-    const { fetch, posts } = ingestStub()
+    const { fetch, posts, cameraPosts } = ingestStub()
     const s = await runRelayCycle({ ...relayBase, log: (m) => logs.push(m), fetch, now: () => T0, cameraSources: [cams], cameraState: state })
     expect(s).toMatchObject({ ok: true, allFailed: false })
     expect(s.cameras).toEqual([{ source: 'bma-floodcam', ok: false, count: 0, error: 'connect to <url> failed' }])
-    expect(posts[0]!.body.cameraFailures).toEqual([{ source: 'bma-floodcam', error: 'connect to <url> failed', attemptedAt: T0.toISOString() }])
-    expect(posts[0]!.raw).not.toContain('dyndns')
+    expect(posts[0]!.body.results).toHaveLength(1)
+    expect(cameraPosts()[0]!.body.cameraFailures).toEqual([{ source: 'bma-floodcam', error: 'connect to <url> failed', attemptedAt: T0.toISOString() }])
+    for (const p of posts) expect(p.raw).not.toContain('dyndns')
     expect(logs.join('\n')).not.toContain('admin:x')
     await runRelayCycle({ ...relayBase, fetch, now: () => at(0.5), cameraSources: [cams], cameraState: state })
     expect(cams.calls).toBe(1) // 1 h backoff
     await runRelayCycle({ ...relayBase, fetch, now: () => at(1), cameraSources: [cams], cameraState: state })
     expect(cams.calls).toBe(2)
+  })
+
+  it('a shutdown during a camera list fetch is not a failure: no backoff, no report, readings still pushed', async () => {
+    const ctrl = new AbortController()
+    const hang = cameraAdapter((_n, now) => bmaList(now))
+    const fetchList = hang.fetchCatalog
+    hang.fetchCatalog = async (ctx) => {
+      if (hang.calls === 0) {
+        hang.calls++
+        await new Promise((_r, reject) => ctx.signal!.addEventListener('abort', () => reject(ctx.signal!.reason), { once: true }))
+      }
+      return fetchList(ctx)
+    }
+    const state = createRelayCameraState()
+    const logs: string[] = []
+    const { fetch, posts, cameraPosts } = ingestStub()
+    const cycle = runRelayCycle({ ...relayBase, log: (m) => logs.push(m), fetch, now: () => T0, cameraSources: [hang], cameraState: state, signal: ctrl.signal })
+    await vi.waitFor(() => expect(posts).toHaveLength(1))
+    ctrl.abort()
+    const s = await cycle
+    expect(s.ok).toBe(true)
+    expect(s.cameras).toEqual([])
+    expect(cameraPosts()).toHaveLength(0)
+    expect(state.get('bma-floodcam')).toMatchObject({ failures: 0, lastAttemptAt: null, pending: null })
+    expect(logs.join('\n')).toContain('interrupted by shutdown')
+    // The restarted relay fetches it at once.
+    await runRelayCycle({ ...relayBase, fetch, now: () => at(0.05), cameraSources: [hang], cameraState: parseRelayCameraState(serializeRelayCameraState(state)) })
+    expect(hang.calls).toBe(2)
+    expect(cameraPosts()).toHaveLength(1)
+  })
+
+  it('a DWR list fetched again gets the previous list, so failed station lookups keep their position', async () => {
+    const seen: (CameraCatalog | null | undefined)[] = []
+    const dwr = { ...cameraAdapter((_n, now) => bmaList(now)), id: 'dwr-cctv' as const }
+    const base = dwr.fetchCatalog
+    dwr.fetchCatalog = async (ctx) => {
+      seen.push(ctx.previous)
+      const r = await base(ctx)
+      return { ...r, source: 'dwr-cctv', cameras: r.cameras.map((c) => ({ ...c, id: `dwr-cctv:${c.nativeId}`, source: 'dwr-cctv' as const })), refs: [] }
+    }
+    const state = createRelayCameraState()
+    const { fetch } = ingestStub()
+    await runRelayCycle({ ...relayBase, fetch, now: () => T0, cameraSources: [dwr], cameraState: state })
+    await runRelayCycle({ ...relayBase, fetch, now: () => at(24), cameraSources: [dwr], cameraState: state })
+    expect(seen[0] ?? null).toBeNull()
+    expect(seen[1]!.cameras).toHaveLength(17)
+    expect(JSON.stringify(seen[1])).not.toContain('rtsp:')
+    // The schedule file never holds it.
+    expect(serializeRelayCameraState(state)).not.toContain('cameras')
   })
 
   it('keeps the schedule (never lists or refs) across --once runs; undelivered lists are refetched', async () => {
@@ -148,17 +337,17 @@ describe('runRelayCycle with camera lists', () => {
     expect(parseRelayCameraState(null).size).toBe(0)
     expect(parseRelayCameraState('{oops').size).toBe(0)
     expect(parseRelayCameraState('{"bma-traffic":{},"dwr-cctv":{"lastAttemptAt":"x","failures":-3}}')).toEqual(
-      new Map([['dwr-cctv', { lastAttemptAt: null, lastSuccessAt: null, failures: 0, pending: null }]]),
+      new Map([['dwr-cctv', { lastAttemptAt: null, lastSuccessAt: null, failures: 0, pending: null, unconfirmed: 0, rejected: 0, previous: null }]]),
     )
   })
 
-  it('never relays the simulated demo cameras and logs what the server kept', async () => {
+  it('never relays the simulated demo cameras', async () => {
     const demo = { ...cameraAdapter((_n, now) => bmaList(now)), id: 'demo-cam' as const }
-    const logs: string[] = []
-    const { fetch, posts } = ingestStub(() => 200, { inserted: 0, cameras: [{ source: 'bma-floodcam', saved: false, warning: 'kept the previous list' }] })
-    await runRelayCycle({ ...relayBase, log: (m) => logs.push(m), fetch, now: () => T0, cameraSources: [demo] })
+    const { fetch, posts } = ingestStub()
+    await runRelayCycle({ ...relayBase, fetch, now: () => T0, cameraSources: [demo] })
+    expect(posts).toHaveLength(1)
     expect(posts[0]!.body.cameraCatalogs).toBeUndefined()
-    expect(logs.join('\n')).toContain('server kept its bma-floodcam camera list: kept the previous list')
+    expect(demo.calls).toBe(0)
   })
 })
 
@@ -294,6 +483,61 @@ describe('POST /api/ingest with camera lists', () => {
     expect(body.cameras[0]!.saved).toBe(false)
     expect(body.cameras[0]!.warning).toMatch(/relayed list ignored/)
     expect(await hasCameraRefs(store, 'bma-floodcam')).toBe(true)
+    log.mockRestore()
+  })
+  it('answers a store failure with retry (and the source), so the relay sends the list again', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const setMeta = store.setMeta.bind(store)
+    let failures = 1
+    vi.spyOn(store, 'setMeta').mockImplementation(async (key, value) => {
+      if (key.startsWith('cctv:catalog:') && failures-- > 0) throw new TypeError('fetch failed (supabase)')
+      return setMeta(key, value)
+    })
+    const first = (await (await post(relayPayload())).json()) as { inserted: number; cameras: unknown[] }
+    expect(first.inserted).toBeGreaterThan(0) // readings stored all the same
+    expect(first.cameras).toEqual([{ source: 'bma-floodcam', saved: false, count: 0, warning: 'store failed: fetch failed (supabase)', retry: true }])
+    expect(await loadCameraCatalogs(store, ['bma-floodcam'])).toEqual([])
+    const again = (await (await post(relayPayload())).json()) as { cameras: { saved: boolean }[] }
+    expect(again.cameras[0]!.saved).toBe(true)
+    log.mockRestore()
+  })
+
+  it('end to end: a relay whose list hit a store failure delivers it on the next cycle', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const setMeta = store.setMeta.bind(store)
+    let failures = 1
+    vi.spyOn(store, 'setMeta').mockImplementation(async (key, value) => {
+      if (key.startsWith('cctv:catalog:') && failures-- > 0) throw new TypeError('fetch failed (supabase)')
+      return setMeta(key, value)
+    })
+    const toServer = ((input: RequestInfo | URL, init?: RequestInit) => ingestRoute.POST(new Request(String(input), init))) as typeof fetch
+    const cams = cameraAdapter((_n, now) => bmaList(now))
+    const state = createRelayCameraState()
+    const now = Date.now()
+    const relay = { ...relayBase, token: 'ingest-token', fetch: toServer, cameraSources: [cams], cameraState: state }
+    await runRelayCycle({ ...relay, now: () => new Date(now) })
+    expect(await loadCameraCatalogs(store, ['bma-floodcam'])).toEqual([])
+    await runRelayCycle({ ...relay, now: () => new Date(now + 0.2 * HOUR) })
+    expect(cams.calls).toBe(1)
+    expect((await loadCameraCatalogs(store, ['bma-floodcam']))[0]!.cameras).toHaveLength(17)
+    log.mockRestore()
+  })
+
+  it('a refused list shows in health: too small (with its reason for the relay) or invalid', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await post(relayPayload())
+    const t = Date.now() + 60_000
+    const small = parseBmaCameraProfile(load('bma-camera-profile-partial.json'), new Date(t))
+    const res = (await (await post({ results: [], cameraCatalogs: [{ source: small.source, fetchedAt: small.fetchedAt, cameras: small.cameras }] })).json()) as {
+      cameras: { saved: boolean; reason?: string; warning: string }[]
+    }
+    expect(res.cameras[0]).toMatchObject({ saved: false, reason: 'shrink' })
+    const [h] = await cameraCatalogHealth(store, ['bma-floodcam'])
+    expect(h!.count).toBe(17)
+    expect(h!.lastError).toMatch(/^relay: bma-floodcam: only 3 of 17 cameras \(< 50%\)/)
+
+    await post({ results: [], cameraCatalogs: [{ source: 'dwr-cctv', fetchedAt: 'yesterday', cameras: [{}] }] })
+    expect((await cameraCatalogHealth(store, ['dwr-cctv']))[0]!.lastError).toBe('relay: list refused: invalid camera list')
     log.mockRestore()
   })
 })

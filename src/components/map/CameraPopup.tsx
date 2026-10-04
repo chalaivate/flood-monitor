@@ -4,6 +4,17 @@ import { OfficialLink } from '../cctv/CameraFrame'
 import { LevelDot } from '../LevelBadge'
 
 /**
+ * Footer of a camera popup: what a still is and how often it changes (DWR stations upload about
+ * every 15 min; BMA stills are fetched on demand), then the credit. No still promise when the
+ * site is link-only on this server.
+ */
+export function popupFootTh(site: Pick<CameraSite, 'cameras' | 'owner'>, image: boolean): string {
+  if (!image) return creditTh(site.owner)
+  const cadence = site.cameras.find((c) => c.media === 'image' && c.cadenceMin)?.cadenceMin
+  return ['ภาพนิ่ง ไม่ใช่วิดีโอ', cadence ? `หน่วยงานถ่ายภาพราวทุก ${cadence} นาที` : '', creditTh(site.owner)].filter(Boolean).join(' · ')
+}
+
+/**
  * Map popup of one camera site. No still is requested here: "ดูภาพ" opens the viewer.
  * Leaflet styles <p> inside popups, so this uses <div>s (see globals.css).
  */
@@ -44,7 +55,7 @@ export function CameraPopup({
         )}
         <OfficialLink camera={site.cameras[0]!} className="fm-btn fm-btn-quiet" />
       </div>
-      <div className="mt-1.5 text-[0.7rem] text-muted">ภาพนิ่ง ไม่ใช่วิดีโอ · {creditTh(site.owner)}</div>
+      <div className="mt-1.5 text-[0.7rem] text-muted">{popupFootTh(site, image)}</div>
     </div>
   )
 }

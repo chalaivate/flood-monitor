@@ -67,6 +67,14 @@ export const LIMITS = {
    * concurrency and hourly budgets in cctv-proxy.ts.
    */
   cctvImage: { capacity: 60, windowMs: MIN },
+  /**
+   * Camera stills that miss the shared cache (each one costs an agency request), per client
+   * IP, all sources together. A dashboard (4 tiles every 3 min) plus an open viewer (every
+   * minute) needs about 23 per 10 min, so one client can spend at most a small share of a
+   * source's hourly budget. Skipped when the IP is unknown (TRUST_PROXY=none); the
+   * per-source budgets still apply then.
+   */
+  cctvMiss: { capacity: 40, windowMs: 10 * MIN },
   /** GET /api/cctv/cameras per client IP. */
   cctvCameras: { capacity: 30, windowMs: MIN },
 } satisfies Record<string, LimitRule>
@@ -173,8 +181,15 @@ export function ipBucket(ip: string): string {
  * everybody out. The global bucket still applies.
  */
 export function enforceClientLimit(scope: string, ip: string, perClient: LimitRule, global?: LimitRule): void {
+  const r = takeClientLimit(scope, ip, perClient, global)
+  if (!r.ok) throw new HttpError(429, MSG.rateLimited, { 'Retry-After': String(r.retryAfterSec) })
+}
+
+/** enforceClientLimit without the throw, for routes with their own 429 body. */
+export function takeClientLimit(scope: string, ip: string, perClient: LimitRule, global?: LimitRule): LimitResult {
   const entries: [string, LimitRule][] = []
   if (ip !== 'unknown') entries.push([`${scope}:${ipBucket(ip)}`, perClient])
   if (global) entries.push([`${scope}:*`, global])
-  enforceLimits(entries)
+  if (entries.length === 0) return { ok: true, retryAfterSec: 0, remaining: Number.POSITIVE_INFINITY }
+  return rateLimiter().takeAll(entries)
 }

@@ -1,4 +1,4 @@
-import { recordCameraCatalogFailure, saveCameraCatalog } from '@/lib/cameras/catalog'
+import { isCameraSourceId, recordCameraCatalogFailure, saveCameraCatalog } from '@/lib/cameras/catalog'
 import { getConfig, type AppConfig } from '@/lib/config'
 import { META_LAST_INGEST, runAlerts, storeSourceResult } from '@/lib/pipeline'
 import { hasBearerSecret } from '@/lib/server/auth'
@@ -18,38 +18,57 @@ export const maxDuration = 300
 
 const MAX_BODY = 25 * 1024 * 1024
 
+/** The answer for one relayed list (same order as `cameraCatalogs`). */
 interface CameraIngestReport {
   source: string | null
   saved: boolean
   count: number
   warning: string | null
+  /** Why it was refused ('shrink', 'older', 'local-fresh', 'invalid', 'empty', 'not-enabled'). */
+  reason?: string
+  /** true: a problem on this server (e.g. the store failed); the relay sends the list again. */
+  retry?: boolean
+}
+
+/** One relayed list → exactly one answer (the relay matches answers by position). */
+async function ingestOneCatalog(store: Store, config: AppConfig, raw: unknown): Promise<CameraIngestReport> {
+  const claimed = (raw as { source?: unknown } | null)?.source
+  const source = typeof claimed === 'string' ? claimed.slice(0, 40) : null
+  try {
+    const parsed = parseRelayCameraCatalog(raw)
+    if (!parsed.ok) {
+      if (isCameraSourceId(parsed.source) && parsed.source !== 'demo-cam' && config.enabledCameraSources.includes(parsed.source)) {
+        await recordCameraCatalogFailure(store, parsed.source, `list refused: ${parsed.error}`).catch(() => undefined)
+      }
+      return { source: parsed.source, saved: false, count: 0, warning: parsed.error, reason: 'invalid' }
+    }
+    const { catalog, dropped } = parsed
+    if (!config.enabledCameraSources.includes(catalog.source)) {
+      return { source: catalog.source, saved: false, count: 0, warning: 'camera source not enabled on this server (CCTV_SOURCES)', reason: 'not-enabled' }
+    }
+    const res = await saveCameraCatalog(store, catalog)
+    const note = dropped > 0 ? `dropped ${dropped} invalid camera(s)` : null
+    return {
+      source: catalog.source,
+      saved: res.saved,
+      count: catalog.cameras.length,
+      warning: [res.warning, note].filter(Boolean).join('; ') || null,
+      ...(res.reason ? { reason: res.reason } : {}),
+    }
+  } catch (err) {
+    return { source, saved: false, count: 0, warning: `store failed: ${err instanceof Error ? err.message : String(err)}`, retry: true }
+  }
 }
 
 /**
  * Store the camera lists a relay pushed (public fields only; this server holds no refs for
- * them, so they are link-only here). Never throws: camera lists must not block readings.
+ * them, so they are link-only here). Never throws: camera lists must not block readings. The
+ * relay forgets a list only once it is saved or refused for good, so a store failure is
+ * answered with `retry: true`. A refused list shows in /api/health (lastError "relay: …").
  */
 async function ingestCameraCatalogs(store: Store, config: AppConfig, payload: IngestPayload): Promise<CameraIngestReport[]> {
   const out: CameraIngestReport[] = []
-  for (const raw of payload.cameraCatalogs) {
-    try {
-      const parsed = parseRelayCameraCatalog(raw)
-      if (!parsed.ok) {
-        out.push({ source: parsed.source, saved: false, count: 0, warning: parsed.error })
-        continue
-      }
-      const { catalog, dropped } = parsed
-      if (!config.enabledCameraSources.includes(catalog.source)) {
-        out.push({ source: catalog.source, saved: false, count: 0, warning: 'camera source not enabled on this server (CCTV_SOURCES)' })
-        continue
-      }
-      const res = await saveCameraCatalog(store, catalog)
-      const note = dropped > 0 ? `dropped ${dropped} invalid camera(s)` : null
-      out.push({ source: catalog.source, saved: res.saved, count: catalog.cameras.length, warning: [res.warning, note].filter(Boolean).join('; ') || null })
-    } catch (err) {
-      out.push({ source: null, saved: false, count: 0, warning: `store failed: ${err instanceof Error ? err.message : String(err)}` })
-    }
-  }
+  for (const raw of payload.cameraCatalogs) out.push(await ingestOneCatalog(store, config, raw))
   for (const raw of payload.cameraFailures) {
     const f = RelayCameraFailureSchema.safeParse(raw)
     if (!f.success || !config.enabledCameraSources.includes(f.data.source)) continue
@@ -65,6 +84,8 @@ async function ingestCameraCatalogs(store: Store, config: AppConfig, payload: In
  * answer as soon as the readings are stored; alert evaluation and delivery (which can
  * take a while with many channels) run after the response so the relay never times out
  * and re-posts. `alerts` in the response is 'scheduled' or null (RUN_ALERTS=0 / no results).
+ * The relay sends camera lists in a POST of their own after the readings (`results: []`, so no
+ * alerts run for it); `cameras` answers each list in order.
  * Readings older than HISTORY_HOURS are pruned after every accepted ingest, so a server
  * that only receives relayed data (no poller, no cron) stays bounded too.
  */

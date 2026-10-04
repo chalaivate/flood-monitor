@@ -15,8 +15,11 @@ const g = globalThis as typeof globalThis & { __floodCronRunning?: boolean }
 
 /**
  * GET|POST /api/cron/poll (Authorization: Bearer CRON_SECRET) → one poll cycle:
- * ingest → alerts (only when RUN_ALERTS=1) → prune.
+ * ingest → alerts (only when RUN_ALERTS=1) → prune → camera lists that are due.
  * Vercel Cron sends GET with `Authorization: Bearer $CRON_SECRET` automatically.
+ * The cron usually runs outside Thailand (Vercel), so it refreshes only the camera lists that
+ * answer from anywhere: a Thai-IP-only list is left to the Thai worker or relay (its stored copy
+ * is still served), and a failure here can never back off their refresh.
  */
 const run = handler('cron/poll', async (req: Request) => {
   const config = getConfig()
@@ -27,7 +30,7 @@ const run = handler('cron/poll', async (req: Request) => {
   if (g.__floodCronRunning) return jsonError(409, 'กำลังดึงข้อมูลรอบก่อนหน้าอยู่ กรุณารอสักครู่')
   g.__floodCronRunning = true
   try {
-    const summary = await runPollCycle(await serverDeps(), { cameras: true })
+    const summary = await runPollCycle(await serverDeps(), { cameras: true, skipThaiIpOnlyCameras: true })
     log(`[cron] ${summarize(summary)}`)
     return json({ ok: !summary.allFailed, ...summary })
   } finally {

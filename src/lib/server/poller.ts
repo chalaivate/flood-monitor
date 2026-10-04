@@ -42,6 +42,12 @@ export interface PollCycleOptions {
    * recorded per source and never fail the cycle.
    */
   cameras?: boolean
+  /**
+   * With `cameras`: refresh only catalogues reachable from anywhere (adapter thaiIpOnly=false).
+   * For hosts that may run outside Thailand (/api/cron/poll): a Thai-IP-only list stays in use
+   * and is refreshed by the Thai worker (or relay) only.
+   */
+  skipThaiIpOnlyCameras?: boolean
 }
 
 /** ingest → alerts (if enabled) → prune readings older than HISTORY_HOURS → camera catalogues (opt-in). */
@@ -56,7 +62,15 @@ export async function runPollCycle(deps: CycleDeps, opts: PollCycleOptions = {})
   const pruned = await pruneOldReadings(deps)
   const cameras =
     opts.cameras && !opts.signal?.aborted
-      ? await refreshCameraCatalogs({ store: deps.store, config: deps.config, fetch: deps.fetch, now: deps.now, log: deps.log, signal: opts.signal })
+      ? await refreshCameraCatalogs({
+          store: deps.store,
+          config: deps.config,
+          fetch: deps.fetch,
+          now: deps.now,
+          log: deps.log,
+          signal: opts.signal,
+          skipThaiIpOnly: !!opts.skipThaiIpOnlyCameras,
+        })
       : []
   return {
     ingest,
@@ -168,12 +182,18 @@ export interface RelayOptions {
   /** Delays before each POST retry. */
   retryDelaysMs?: number[]
   /**
-   * Camera catalogue adapters to fetch when due and push with the readings. Only the public
-   * camera fields are sent: upstream refs (stream addresses) never leave this machine.
+   * Camera catalogue adapters to fetch when due and push after the readings, in a POST of their
+   * own (the readings never wait for them). Only the public camera fields are sent: upstream
+   * refs (stream addresses) never leave this machine.
    */
   cameraSources?: CameraCatalogAdapter[]
   /** Schedule kept across cycles (the relay has no store); defaults to a per-process one. */
   cameraState?: RelayCameraState
+  /**
+   * Aborted on shutdown: a camera list fetch in progress stops (not counted as a failure) and no
+   * camera POST starts. The readings of the cycle are still pushed.
+   */
+  signal?: AbortSignal
 }
 
 export interface RelaySummary {
@@ -188,11 +208,17 @@ export interface RelaySummary {
 
 interface RelayCameraEntry {
   lastAttemptAt: string | null
-  /** fetchedAt of the last list fetched here. */
+  /** fetchedAt of the last list fetched here (null once the server asks for a fresh one). */
   lastSuccessAt: string | null
   failures: number
-  /** Fetched but not yet accepted by the server (re-sent next cycle). */
+  /** Fetched but not yet confirmed by the server (re-sent next cycle). */
   pending: CameraCatalog | null
+  /** Deliveries of `pending` the server could not confirm (e.g. its store failed). */
+  unconfirmed: number
+  /** Lists in a row the server did not take (too small, or never confirmed): drives the refetch backoff. */
+  rejected: number
+  /** Last list fetched here (memory only): DWR keeps a station's last known position from it. */
+  previous: CameraCatalog | null
 }
 
 /** In-memory schedule of the camera lists a relay pushes (one per worker process). */
@@ -200,6 +226,10 @@ export type RelayCameraState = Map<CameraSourceId, RelayCameraEntry>
 
 export function createRelayCameraState(): RelayCameraState {
   return new Map()
+}
+
+function newRelayCameraEntry(): RelayCameraEntry {
+  return { lastAttemptAt: null, lastSuccessAt: null, failures: 0, pending: null, unconfirmed: 0, rejected: 0, previous: null }
 }
 
 /**
@@ -227,7 +257,7 @@ export function parseRelayCameraState(text: string | null): RelayCameraState {
     if (!isCameraSourceId(source) || !v || typeof v !== 'object') continue
     const e = v as Record<string, unknown>
     const failures = typeof e.failures === 'number' && Number.isInteger(e.failures) && e.failures >= 0 ? Math.min(e.failures, 100) : 0
-    state.set(source, { lastAttemptAt: iso(e.lastAttemptAt), lastSuccessAt: iso(e.lastSuccessAt), failures, pending: null })
+    state.set(source, { ...newRelayCameraEntry(), lastAttemptAt: iso(e.lastAttemptAt), lastSuccessAt: iso(e.lastSuccessAt), failures })
   }
   return state
 }
@@ -253,6 +283,8 @@ interface RelayCameraBatch {
 
 /** A camera list fetch in relay mode must finish within this. */
 const CATALOG_RELAY_DEADLINE_MS = 120_000
+/** A list the server could not confirm is re-sent this many times, then refetched with backoff. */
+export const RELAY_CAMERA_MAX_UNCONFIRMED = 6
 
 /** Fetch the camera lists that are due (in-memory schedule); keep unsent ones for the next push. */
 async function relayCameraCatalogs(opts: RelayOptions, now: Date): Promise<RelayCameraBatch> {
@@ -262,61 +294,183 @@ async function relayCameraCatalogs(opts: RelayOptions, now: Date): Promise<Relay
   await Promise.all(
     adapters.map(async (a) => {
       let st = state.get(a.id)
-      if (!st) state.set(a.id, (st = { lastAttemptAt: null, lastSuccessAt: null, failures: 0, pending: null }))
-      const due = catalogDue({
-        source: a.id,
-        refreshHours: a.refreshHours,
-        thaiIpOnly: a.thaiIpOnly,
-        fetchedAt: st.lastSuccessAt,
-        local: true,
-        lastAttemptAt: st.lastAttemptAt,
-        failures: st.failures,
-        now,
-      })
+      if (!st) state.set(a.id, (st = newRelayCameraEntry()))
+      // A list the server has not confirmed yet is sent again rather than refetched.
+      const due =
+        !st.pending &&
+        !opts.signal?.aborted &&
+        catalogDue({
+          source: a.id,
+          refreshHours: a.refreshHours,
+          thaiIpOnly: a.thaiIpOnly,
+          fetchedAt: st.lastSuccessAt,
+          local: true,
+          lastAttemptAt: st.lastAttemptAt,
+          failures: st.failures,
+          now,
+        })
       let error: string | undefined
+      let interrupted = false
       if (due) {
+        const prevAttempt = st.lastAttemptAt
         st.lastAttemptAt = now.toISOString()
+        const deadline = AbortSignal.timeout(CATALOG_RELAY_DEADLINE_MS)
         try {
           const result = await a.fetchCatalog({
             fetch: opts.fetch,
             now,
             timeoutMs: opts.config.FETCH_TIMEOUT_MS,
             sleep: opts.sleep,
-            signal: AbortSignal.timeout(CATALOG_RELAY_DEADLINE_MS),
+            signal: opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline,
+            previous: st.previous,
           })
           // Public fields only: the refs stay here (the receiving server cannot use them).
           st.pending = publicCatalog(result)
+          st.previous = st.pending
+          st.unconfirmed = 0
           st.lastSuccessAt = result.fetchedAt
           st.failures = 0
           opts.log(`[relay] ${a.id} camera list: ${st.pending.cameras.length} camera(s)`)
         } catch (err) {
-          st.failures++
-          error = redactSecrets(errText(err))
-          batch.failures.push({ source: a.id, error, attemptedAt: now.toISOString() })
-          opts.log(`[relay] ${a.id} camera list FAILED: ${error}`)
+          if (opts.signal?.aborted) {
+            // Shutdown, not an upstream failure: no backoff; the next run fetches it again.
+            st.lastAttemptAt = prevAttempt
+            interrupted = true
+            opts.log(`[relay] ${a.id} camera list: interrupted by shutdown`)
+          } else {
+            st.failures++
+            error = redactSecrets(deadline.aborted ? `camera list took longer than ${CATALOG_RELAY_DEADLINE_MS / 1000} s` : errText(err))
+            batch.failures.push({ source: a.id, error, attemptedAt: now.toISOString() })
+            opts.log(`[relay] ${a.id} camera list FAILED: ${error}`)
+          }
         }
       }
-      // An earlier list the server has not accepted yet is sent again.
       if (st.pending) batch.catalogs.push(st.pending)
-      if (due || st.pending) batch.report.push({ source: a.id, ok: !error, count: st.pending?.cameras.length ?? 0, ...(error ? { error } : {}) })
+      if ((due && !interrupted) || st.pending) batch.report.push({ source: a.id, ok: !error, count: st.pending?.cameras.length ?? 0, ...(error ? { error } : {}) })
     }),
   )
   return batch
 }
 
-/** Fetch Thai-only sources locally and push them to `<baseUrl>/api/ingest`. */
+/** The server's answer for one relayed list (POST /api/ingest → cameras[i]). */
+interface CameraAnswer {
+  source?: unknown
+  saved?: unknown
+  warning?: unknown
+  reason?: unknown
+  retry?: unknown
+}
+
+/**
+ * What the relay does with each list it sent, from the server's answer: saved → done; a
+ * transient server problem (retry, or no usable answer) → send it again next cycle; refused as
+ * too small → fetch again with backoff (a smaller list is accepted once it keeps coming back);
+ * any other refusal (server's own list is fresh, older, invalid, not enabled) → done for this
+ * period. `answers` is null when the response could not be read.
+ */
+function settleCameraDeliveries(opts: RelayOptions, sent: CameraCatalog[], answers: CameraAnswer[] | null, now: Date): void {
+  const state = opts.cameraState ?? defaultRelayCameraState
+  sent.forEach((cat, i) => {
+    const st = state.get(cat.source)
+    if (!st || st.pending !== cat) return
+    const a = answers?.[i]
+    const matches = !!a && typeof a === 'object' && (a.source === cat.source || a.source === null || a.source === undefined)
+    const warning = matches && typeof a.warning === 'string' ? a.warning.slice(0, 200) : null
+    if (matches && a.saved === true) {
+      st.pending = null
+      st.unconfirmed = 0
+      st.rejected = 0
+      return
+    }
+    if (!matches || a.retry === true) {
+      st.unconfirmed++
+      if (st.unconfirmed < RELAY_CAMERA_MAX_UNCONFIRMED) {
+        opts.log(`[relay] server did not confirm the ${cat.source} camera list${warning ? `: ${warning}` : ''}; sending it again next cycle`)
+        return
+      }
+      opts.log(`[relay] server did not confirm the ${cat.source} camera list ${st.unconfirmed} times; fetching a new one later`)
+    } else {
+      opts.log(`[relay] server kept its ${cat.source} camera list${warning ? `: ${warning}` : ''}`)
+      if (a.reason !== 'shrink') {
+        // Done for this period (the next list is fetched when due).
+        st.pending = null
+        st.unconfirmed = 0
+        st.rejected = 0
+        return
+      }
+    }
+    // Fetch a fresh list with backoff (1 h, 2 h, 4 h … up to a period): the server accepts a
+    // smaller list once it keeps coming back, and a list it could not store is replaced.
+    st.pending = null
+    st.unconfirmed = 0
+    st.rejected++
+    st.lastSuccessAt = null
+    st.lastAttemptAt = now.toISOString()
+    st.failures = st.rejected
+  })
+}
+
+async function postIngest(opts: RelayOptions, body: string): Promise<Response> {
+  return opts.fetch(ingestUrl(opts.baseUrl), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${opts.token}`, 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(Math.max(30_000, opts.config.FETCH_TIMEOUT_MS)),
+  })
+}
+
+/**
+ * Push the camera lists (and list failures) in a POST of their own, once (no retries); whatever
+ * the server did not confirm is sent again next cycle, up to RELAY_CAMERA_MAX_UNCONFIRMED times.
+ */
+async function pushCameraLists(opts: RelayOptions, cams: RelayCameraBatch, now: Date): Promise<void> {
+  if (cams.catalogs.length === 0 && cams.failures.length === 0) return
+  const body = JSON.stringify({
+    results: [],
+    failures: [],
+    ...(cams.catalogs.length ? { cameraCatalogs: cams.catalogs } : {}),
+    ...(cams.failures.length ? { cameraFailures: cams.failures } : {}),
+  })
+  let answers: CameraAnswer[] | null = null
+  try {
+    const res = await postIngest(opts, body)
+    const text = await res.text().catch(() => '')
+    if (!res.ok) {
+      opts.log(`[relay] camera lists not delivered: ingest HTTP ${res.status}`)
+    } else {
+      try {
+        const parsed = JSON.parse(text) as { cameras?: unknown }
+        if (Array.isArray(parsed.cameras)) answers = parsed.cameras as CameraAnswer[]
+        else {
+          // A server without camera support answers without `cameras`: nothing to wait for.
+          opts.log('[relay] the server does not report on camera lists (older version?)')
+          answers = cams.catalogs.map((c) => ({ source: c.source, saved: true }))
+        }
+      } catch {
+        opts.log('[relay] camera lists: unreadable answer from the server')
+      }
+    }
+  } catch (err) {
+    opts.log(`[relay] camera lists not delivered: ${errText(err)}`)
+  }
+  settleCameraDeliveries(opts, cams.catalogs, answers, now)
+}
+
+/**
+ * Fetch Thai-only sources locally and push them to `<baseUrl>/api/ingest`. Camera lists that are
+ * due are fetched alongside but pushed afterwards in their own POST, so the readings (and the
+ * server's alerts) never wait for a slow camera list.
+ */
 export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
   const now = opts.now?.() ?? new Date()
+  // Started first (other upstream hosts); never rejects.
+  const camerasP = relayCameraCatalogs(opts, now)
   // Same politeness as runIngest: sources on one upstream host (all bma-* live on
-  // weather.bangkok.go.th, whose WAF bans bursts) run one after another. Camera lists come
-  // from other hosts and are fetched alongside.
-  const [settled, cams] = await Promise.all([
-    fetchPolitely(opts.sources, (s) => s.fetch({ fetch: opts.fetch, now, timeoutMs: opts.config.FETCH_TIMEOUT_MS, sleep: opts.sleep })),
-    relayCameraCatalogs(opts, now),
-  ])
+  // weather.bangkok.go.th, whose WAF bans bursts) run one after another.
+  const settled = await fetchPolitely(opts.sources, (s) => s.fetch({ fetch: opts.fetch, now, timeoutMs: opts.config.FETCH_TIMEOUT_MS, sleep: opts.sleep }))
   const results: SourceFetchResult[] = []
   const failures: { source: SourceId; error: string; attemptedAt: string }[] = []
-  const summary: RelaySummary = { ok: false, results: [], cameras: cams.report, inserted: null, allFailed: true }
+  const summary: RelaySummary = { ok: false, results: [], cameras: [], inserted: null, allFailed: true }
   settled.forEach((res, i) => {
     const src = opts.sources[i]!
     if (res.status === 'fulfilled') {
@@ -331,40 +485,19 @@ export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
     }
   })
 
-  const url = ingestUrl(opts.baseUrl)
-  const body = JSON.stringify({
-    results,
-    failures,
-    ...(cams.catalogs.length ? { cameraCatalogs: cams.catalogs } : {}),
-    ...(cams.failures.length ? { cameraFailures: cams.failures } : {}),
-  })
+  const body = JSON.stringify({ results, failures })
   const delays = opts.retryDelaysMs ?? [5_000, 15_000, 30_000]
   const sleep = opts.sleep ?? defaultSleep
   for (let attempt = 0; ; attempt++) {
     let retryable = true
     try {
-      const res = await opts.fetch(url, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${opts.token}`, 'Content-Type': 'application/json' },
-        body,
-        signal: AbortSignal.timeout(Math.max(30_000, opts.config.FETCH_TIMEOUT_MS)),
-      })
+      const res = await postIngest(opts, body)
       const text = await res.text().catch(() => '')
       if (res.ok) {
         try {
-          const answer = JSON.parse(text) as { inserted?: number; cameras?: { source?: string; saved?: boolean; warning?: string | null }[] }
-          summary.inserted = answer.inserted ?? null
-          for (const c of Array.isArray(answer.cameras) ? answer.cameras : []) {
-            if (c && c.saved === false && c.warning) opts.log(`[relay] server kept its ${String(c.source)} camera list: ${String(c.warning).slice(0, 200)}`)
-          }
+          summary.inserted = (JSON.parse(text) as { inserted?: number }).inserted ?? null
         } catch {
           summary.inserted = null
-        }
-        // Delivered: the server decides whether to keep each list.
-        const state = opts.cameraState ?? defaultRelayCameraState
-        for (const cat of cams.catalogs) {
-          const st = state.get(cat.source)
-          if (st?.pending === cat) st.pending = null
         }
         summary.ok = true
         summary.error = undefined
@@ -383,5 +516,11 @@ export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
   if (summary.ok) opts.log(`[relay] pushed ${results.length} result(s) → ${summary.inserted ?? '?'} new readings`)
   else opts.log(`[relay] push FAILED: ${summary.error}`)
   summary.allFailed = !summary.ok || results.length === 0
+
+  // Camera lists after the readings. Skipped when the server is not taking readings (or on
+  // shutdown): unsent lists stay pending and go out with a later cycle.
+  const cams = await camerasP
+  summary.cameras = cams.report
+  if (summary.ok && !opts.signal?.aborted) await pushCameraLists(opts, cams, now)
   return summary
 }

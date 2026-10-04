@@ -20,7 +20,8 @@ import { loadConfig } from '@/lib/config'
 import { parseBmaRoadFlood } from '@/lib/sources/bma-misc'
 import { BMA_FLOODCAM_LIST_URL, parseBmaCameraProfile } from '@/lib/sources/cameras/bma-floodcam'
 import { demoCamSource } from '@/lib/sources/cameras/demo'
-import type { CameraCatalogAdapter } from '@/lib/sources/cameras/types'
+import { DWR_LIST_URL, dwrCctvSource, dwrStationUrl } from '@/lib/sources/cameras/dwr'
+import type { CameraCatalogAdapter, CameraCatalogContext } from '@/lib/sources/cameras/types'
 import { DEMO_SOURCES } from '@/lib/sources/demo'
 import { SqliteStore } from '@/lib/store/sqlite'
 import type { Camera, CameraCatalogResult, CameraSourceId, Station } from '@/lib/types'
@@ -56,7 +57,7 @@ function fakeAdapter(
     thaiIpOnly: false,
     refreshHours: 24,
     calls: 0,
-    async fetchCatalog(ctx: { now: Date }) {
+    async fetchCatalog(ctx: CameraCatalogContext) {
       a.calls++
       const r = make(a.calls, ctx.now)
       if (r instanceof Error) throw r
@@ -419,12 +420,41 @@ describe('catalogDue', () => {
     expect(failureBackoffHours(0, 24)).toBe(0)
   })
 
+  const bma = { ...base, source: 'bma-floodcam' as const, refreshHours: 24, thaiIpOnly: true }
+
   it('daily BMA list drifts to 03:00 Bangkok', () => {
-    const bma = { ...base, source: 'bma-floodcam' as const, refreshHours: 24, thaiIpOnly: true }
     const fetched15h = T0.toISOString() // 15:00 Bangkok
     expect(catalogDue({ ...bma, fetchedAt: fetched15h, now: new Date('2026-10-04T19:30:00Z') })).toBe(false) // 02:30 BKK
     expect(catalogDue({ ...bma, fetchedAt: fetched15h, now: new Date('2026-10-04T20:05:00Z') })).toBe(true) // 03:05 BKK, 12 h old
-    expect(catalogDue({ ...bma, fetchedAt: new Date('2026-10-04T19:00:00Z').toISOString(), now: new Date('2026-10-04T20:05:00Z') })).toBe(false)
+    // Fetched within the last hour: not again in the same window.
+    expect(catalogDue({ ...bma, fetchedAt: new Date('2026-10-04T19:30:00Z').toISOString(), now: new Date('2026-10-04T20:05:00Z') })).toBe(false)
+    expect(catalogDue({ ...bma, fetchedAt: new Date('2026-10-04T20:01:00Z').toISOString(), now: new Date('2026-10-04T20:50:00Z') })).toBe(false)
+  })
+
+  it('a list first fetched in the evening or at night also moves to the next 03:xx Bangkok window', () => {
+    const window = new Date('2026-10-04T20:05:00Z') // 03:05 BKK on 5 Oct
+    for (const fetched of ['2026-10-04T09:00:00Z', '2026-10-04T13:00:00Z', '2026-10-04T16:00:00Z', '2026-10-04T19:00:00Z']) {
+      // 16:00, 20:00, 23:00 and 02:00 Bangkok
+      expect(catalogDue({ ...bma, fetchedAt: fetched, lastAttemptAt: fetched, now: window }), fetched).toBe(true)
+    }
+  })
+
+  it('simulated 10-minute polling: whatever the first fetch time, refreshes settle at 03:xx Bangkok, at most one extra fetch', () => {
+    for (const startBkk of [2, 10, 15, 16, 20, 23]) {
+      const start = Date.parse('2026-10-04T00:00:00Z') + ((startBkk - 7 + 24) % 24) * HOUR
+      let fetchedAt: string | null = null
+      const refreshes: Date[] = []
+      for (let t = start; t < start + 6 * 24 * HOUR; t += 10 * 60_000) {
+        const now = new Date(t)
+        if (catalogDue({ ...bma, fetchedAt, lastAttemptAt: fetchedAt, now })) {
+          fetchedAt = now.toISOString()
+          refreshes.push(now)
+        }
+      }
+      const bkkHours = refreshes.map((d) => (d.getUTCHours() + 7) % 24)
+      expect(bkkHours.slice(1).every((h) => h === 3), `start ${startBkk}:00 → ${bkkHours.join(',')}`).toBe(true)
+      expect(refreshes.length).toBeLessThanOrEqual(7) // 6 days + the first fetch
+    }
   })
 
   it('a relayed list is refetched locally once per period, unless the upstream is Thai-IP-only', () => {
@@ -435,9 +465,223 @@ describe('catalogDue', () => {
     expect(catalogDue({ ...relayed, thaiIpOnly: true })).toBe(false)
   })
 
+  it('a relayed Thai-IP-only list is left to the relay: never due here, even when old or at 03:xx', () => {
+    const relayed = { ...bma, local: false }
+    expect(catalogDue({ ...relayed, fetchedAt: at(-24).toISOString() })).toBe(false)
+    expect(catalogDue({ ...relayed, fetchedAt: at(-24 * 30).toISOString() })).toBe(false)
+    expect(catalogDue({ ...relayed, fetchedAt: new Date('2026-10-04T08:00:00Z').toISOString(), now: new Date('2026-10-04T20:05:00Z') })).toBe(false)
+    // No list at all: this host may still try (with backoff).
+    expect(catalogDue({ ...relayed, fetchedAt: null })).toBe(true)
+  })
+
   it('demo (refreshHours = ∞) only when missing', () => {
     const demo = { ...base, source: 'demo-cam' as const, refreshHours: Number.POSITIVE_INFINITY }
     expect(catalogDue({ ...demo, fetchedAt: null })).toBe(true)
     expect(catalogDue({ ...demo, fetchedAt: at(-24 * 3650).toISOString() })).toBe(false)
+  })
+})
+
+describe('refresh robustness', () => {
+  const deps = (store: SqliteStore, adapters: CameraCatalogAdapter[], now: Date, over: Record<string, unknown> = {}) => ({
+    store,
+    config: liveConfig,
+    fetch: (() => Promise.reject(new Error('no network in tests'))) as unknown as typeof fetch,
+    now: () => now,
+    adapters,
+    sleep: async () => {},
+    ...over,
+  })
+  const status = async (store: SqliteStore, source: CameraSourceId) => JSON.parse((await store.getMeta(STATUS_META_PREFIX + source)) ?? '{}')
+
+  describe('DWR station lookups (real adapter, stubbed upstream)', () => {
+    const dwrList = load('dwr-cctv-list.json')
+    const station = load('dwr-station-TA100220.json')
+    const POINTS: Record<string, { lat: number; lon: number }> = {
+      TA100220: { lat: 13.738694, lon: 100.49633 },
+      TA100221: { lat: 13.59801, lon: 100.59622 },
+      TC100224: { lat: 13.965762, lon: 100.53591 },
+      TA100218: { lat: 14.368386, lon: 100.52908 },
+      TA130202: { lat: 13.530655, lon: 100.26536 },
+      TA100219: { lat: 14.025061, lon: 100.53942 },
+    }
+    /** Upstream stub: the listed codes answer HTTP 502 on their station lookup. */
+    const upstream = (failing: string[] = []) =>
+      (async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === DWR_LIST_URL) return Response.json(dwrList)
+        const code = decodeURIComponent(url.split('/').pop()!)
+        if (url !== dwrStationUrl(code)) throw new TypeError(`unexpected ${url}`)
+        if (failing.includes(code)) return new Response('bad gateway', { status: 502 })
+        const s = structuredClone(station)
+        s.value.fullCon.entity.point = POINTS[code] ?? null
+        return Response.json(s)
+      }) as typeof fetch
+    const ids = async (store: SqliteStore) => (await loadCameraCatalogs(store, ['dwr-cctv']))[0]!.cameras.map((c) => c.nativeId)
+
+    it('a weekly refresh with a few failed lookups keeps those cameras at their last known position', async () => {
+      const store = new SqliteStore(':memory:')
+      const all = ['TA100220', 'TA100221', 'TC100224', 'TA100218', 'TA130202', 'TA100219']
+      await refreshCameraCatalogs(deps(store, [dwrCctvSource], T0, { fetch: upstream() }))
+      expect(await ids(store)).toEqual(all)
+      const res = await refreshCameraCatalogs(deps(store, [dwrCctvSource], at(168), { fetch: upstream(['TA100220', 'TA100221']) }))
+      expect(res[0]).toMatchObject({ source: 'dwr-cctv', ok: true, count: 6 })
+      expect(res[0]!.warnings).toContain('kept the last known position of 2 camera(s) (station lookup failed or gave none)')
+      expect(await ids(store)).toEqual(all)
+      const ta = (await findCamera(store, 'dwr-cctv:TA100220'))!
+      expect([ta.lat, ta.lng]).toEqual([13.738694, 100.49633])
+      expect(await getCameraRef(store, 'dwr-cctv:TA100220')).toBe('00000000-0000-4000-8000-000000000220')
+      expect((await loadCameraCatalogs(store, ['dwr-cctv']))[0]!.fetchedAt).toBe(at(168).toISOString())
+      store.close()
+    })
+
+    it('many failed lookups without a known position fail the refresh (backoff) instead of saving a short list', async () => {
+      const store = new SqliteStore(':memory:')
+      const res = await refreshCameraCatalogs(deps(store, [dwrCctvSource], T0, { fetch: upstream(['TA100220', 'TA100221', 'TC100224']) }))
+      expect(res[0]).toMatchObject({ ok: false, error: 'DWR camera list: station lookup failed for 3 of 6 camera(s); kept the previous list' })
+      expect(await loadCameraCatalogs(store, ['dwr-cctv'])).toEqual([])
+      expect(await status(store, 'dwr-cctv')).toMatchObject({ failures: 1 })
+      // Retried an hour later.
+      const ok = await refreshCameraCatalogs(deps(store, [dwrCctvSource], at(1), { fetch: upstream() }))
+      expect(ok[0]).toMatchObject({ ok: true, count: 6 })
+      store.close()
+    })
+  })
+
+  describe('relayed lists that shrink', () => {
+    const relayedAt = (count: number, h: number) => publicCatalog(list('bma-floodcam', count, at(h)))
+
+    it('are refused (shown in health) until the smaller list comes back ≥ 3 times over ≥ 24 h; re-sends do not count', async () => {
+      const store = new SqliteStore(':memory:')
+      expect((await saveCameraCatalog(store, relayedAt(20, 0), T0)).saved).toBe(true)
+      const d1 = await saveCameraCatalog(store, relayedAt(8, 24), at(24))
+      expect(d1).toMatchObject({ saved: false, reason: 'shrink' })
+      const [h1] = await cameraCatalogHealth(store, ['bma-floodcam'])
+      expect(h1).toMatchObject({ count: 20, catalogAt: T0.toISOString() })
+      expect(h1!.lastError).toMatch(/^relay: bma-floodcam: only 8 of 20 cameras \(< 50%\)/)
+      // The same list re-sent many times is one sighting.
+      for (const h of [24.2, 25, 30, 47]) expect((await saveCameraCatalog(store, relayedAt(8, 24), at(h))).saved).toBe(false)
+      expect((await saveCameraCatalog(store, relayedAt(8, 48), at(48))).saved).toBe(false) // 2nd fetch
+      const d3 = await saveCameraCatalog(store, relayedAt(8, 72), at(72)) // 3rd fetch, 48 h after the first
+      expect(d3).toEqual({ saved: true, warning: null })
+      expect((await loadCameraCatalogs(store, ['bma-floodcam']))[0]!.cameras).toHaveLength(8)
+      expect((await cameraCatalogHealth(store, ['bma-floodcam']))[0]!.lastError).toBeNull()
+      // This host's own retry backoff was never touched by the refusals.
+      expect(await status(store, 'bma-floodcam')).toMatchObject({ failures: 0, lastAttemptAt: null, shrink: null })
+      store.close()
+    })
+
+    it('a list stamped in the future (sender clock) shows in health too', async () => {
+      const store = new SqliteStore(':memory:')
+      await saveCameraCatalog(store, relayedAt(5, 0), T0)
+      const res = await saveCameraCatalog(store, relayedAt(5, 2), at(1))
+      expect(res).toMatchObject({ saved: false, reason: 'invalid' })
+      expect((await cameraCatalogHealth(store, ['bma-floodcam']))[0]!.lastError).toMatch(/^relay: bma-floodcam: fetchedAt is in the future/)
+      store.close()
+    })
+  })
+
+  describe('Thai-IP-only lists and hosts that cannot reach them', () => {
+    const thaiOnly = (make: (n: number, now: Date) => CameraCatalogResult | Error) => fakeAdapter('bma-floodcam', make, { thaiIpOnly: true })
+
+    it('skipThaiIpOnly (the cron) refreshes only lists reachable from anywhere', async () => {
+      const store = new SqliteStore(':memory:')
+      const bma = thaiOnly((_n, now) => list('bma-floodcam', 3, now))
+      const dwr = fakeAdapter('dwr-cctv', (_n, now) => list('dwr-cctv', 2, now))
+      const res = await refreshCameraCatalogs(deps(store, [bma, dwr], T0, { skipThaiIpOnly: true }))
+      expect(res).toEqual([{ source: 'dwr-cctv', ok: true, count: 2, warnings: [] }])
+      expect(bma.calls).toBe(0)
+      expect(await store.getMeta(STATUS_META_PREFIX + 'bma-floodcam')).toBeNull()
+      store.close()
+    })
+
+    it('a failure on one host never backs off another host sharing the store (mode B)', async () => {
+      const store = new SqliteStore(':memory:')
+      const thai = thaiOnly((_n, now) => list('bma-floodcam', 10, now))
+      const cloud = thaiOnly(() => new TypeError('fetch failed'))
+      const onThai = (h: number) => refreshCameraCatalogs(deps(store, [thai], at(h), { hostId: 'thai-pc' }))
+      const onCloud = (h: number) => refreshCameraCatalogs(deps(store, [cloud], at(h), { hostId: 'cloud-1' }))
+      await onThai(0)
+      const fail = await onCloud(24)
+      expect(fail[0]).toMatchObject({ ok: false, error: 'fetch failed (แหล่งข้อมูลนี้รับเฉพาะ IP ในประเทศไทย)' })
+      await onCloud(25)
+      // The Thai worker is not held back by the cloud host's two failures.
+      const ok = await onThai(25.1)
+      expect(ok[0]).toMatchObject({ ok: true, count: 10 })
+      expect(thai.calls).toBe(2)
+      expect((await cameraCatalogHealth(store, ['bma-floodcam']))[0]!.lastError).toBeNull()
+
+      // Each host keeps its own backoff: with no list at all, the failing host waits 1 h, 2 h…
+      const fresh = new SqliteStore(':memory:')
+      const onCloud2 = (h: number) => refreshCameraCatalogs(deps(fresh, [cloud], at(h), { hostId: 'cloud-1' }))
+      const onThai2 = (h: number) => refreshCameraCatalogs(deps(fresh, [thai], at(h), { hostId: 'thai-pc' }))
+      cloud.calls = 0
+      thai.calls = 0
+      await onCloud2(0)
+      await onCloud2(0.5)
+      expect(cloud.calls).toBe(1)
+      await onThai2(0.5)
+      expect(thai.calls).toBe(1)
+      store.close()
+      fresh.close()
+    })
+  })
+
+  it('a fetched list that cannot be stored backs off like a failed fetch (no refetch every cycle)', async () => {
+    const store = new SqliteStore(':memory:')
+    const setMeta = store.setMeta.bind(store)
+    vi.spyOn(store, 'setMeta').mockImplementation(async (key, value) => {
+      if (key.startsWith(CATALOG_META_PREFIX)) throw new Error('payload too large')
+      return setMeta(key, value)
+    })
+    const a = fakeAdapter('dwr-cctv', (_n, now) => list('dwr-cctv', 3, now))
+    const res = await refreshCameraCatalogs(deps(store, [a], T0))
+    expect(res[0]).toMatchObject({ ok: false, error: 'store failed: payload too large' })
+    expect(await status(store, 'dwr-cctv')).toMatchObject({ failures: 1, lastError: 'store failed: payload too large' })
+    await refreshCameraCatalogs(deps(store, [a], at(0.5)))
+    expect(a.calls).toBe(1)
+    store.close()
+  })
+
+  describe('interrupted refreshes', () => {
+    /** An adapter that only returns when its signal aborts (then rejects like fetch does). */
+    const hanging = (thaiIpOnly = false) => {
+      const a = fakeAdapter('dwr-cctv', (_n, now) => list('dwr-cctv', 3, now), { thaiIpOnly })
+      const base = a.fetchCatalog
+      a.fetchCatalog = async (ctx) => {
+        if (a.calls === 0) {
+          a.calls++
+          return new Promise((_r, reject) => ctx.signal!.addEventListener('abort', () => reject(ctx.signal!.reason), { once: true }))
+        }
+        return base(ctx)
+      }
+      return a
+    }
+
+    it('a shutdown mid-fetch is not a failure: no backoff, no health error, refreshed right after the restart', async () => {
+      const store = new SqliteStore(':memory:')
+      const a = hanging()
+      const ctrl = new AbortController()
+      const logs: string[] = []
+      const run = refreshCameraCatalogs(deps(store, [a], T0, { signal: ctrl.signal, log: (m: string) => logs.push(m) }))
+      await vi.waitFor(() => expect(a.calls).toBe(1))
+      ctrl.abort()
+      expect(await run).toEqual([{ source: 'dwr-cctv', ok: false, count: 0, skipped: true, error: 'aborted' }])
+      expect(await status(store, 'dwr-cctv')).toEqual({})
+      expect((await cameraCatalogHealth(store, ['dwr-cctv']))[0]!.lastError).toBeNull()
+      expect(logs.join('\n')).toContain('refresh interrupted')
+      // "Restart" two minutes later: the missing list is fetched at once.
+      const again = await refreshCameraCatalogs(deps(store, [a], at(2 / 60)))
+      expect(again[0]).toMatchObject({ ok: true, count: 3 })
+      store.close()
+    })
+
+    it('our own refresh deadline is a failure (backoff) without the Thai-IP-only note', async () => {
+      const store = new SqliteStore(':memory:')
+      const a = hanging(true)
+      const res = await refreshCameraCatalogs(deps(store, [a], T0, { deadlineMs: 20 }))
+      expect(res[0]).toMatchObject({ ok: false, error: 'refresh took longer than 0.02 s' })
+      expect((await cameraCatalogHealth(store, ['dwr-cctv']))[0]!.lastError).toBe('refresh took longer than 0.02 s')
+      store.close()
+    })
   })
 })

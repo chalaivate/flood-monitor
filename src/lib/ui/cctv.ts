@@ -16,11 +16,14 @@ import { levelLabel } from './levels'
 // --- copy -------------------------------------------------------------------------------------
 
 export const CCTV_CARD_TITLE = 'กล้อง CCTV ใกล้บ้าน'
-export const CCTV_CARD_SUBTITLE = 'ภาพนิ่งจากกล้องของหน่วยงาน อัปเดตราวทุก 1–3 นาที — ใช้ดูประกอบ สถานะยังคำนวณจากระยะห่างตลิ่ง'
+/** Status comes from the joined sensors (freeboard or road-flood depth), never from a picture. */
+export const CCTV_STATUS_FROM_SENSORS_TH = 'สถานะมาจากเซ็นเซอร์วัดน้ำ ไม่ได้มาจากภาพ'
+/** Source-neutral card subtitle (see cardSubtitleTh for the one that names each cadence). */
+export const CCTV_CARD_SUBTITLE = `ภาพนิ่งจากกล้องของหน่วยงาน อัปเดตเป็นระยะ — ใช้ดูประกอบเท่านั้น ${CCTV_STATUS_FROM_SENSORS_TH}`
 export const CCTV_RIGHTS_TH = 'ภาพเป็นของหน่วยงานเจ้าของกล้อง ซึ่งไม่ได้รับรองหรือเกี่ยวข้องกับโครงการนี้'
 export const CCTV_DEMO_TH = 'ภาพจำลอง — ไม่ใช่ภาพจากกล้องจริง'
 export const CCTV_LINK_ONLY_TH = 'เซิร์ฟเวอร์นี้แสดงภาพกล้องนี้ไม่ได้ — เปิดดูที่เว็บของหน่วยงาน'
-export const CCTV_LOADING_TH = 'กำลังขอภาพจากกล้อง… (อาจใช้เวลาราว 10 วินาที)'
+export const CCTV_LOADING_TH = 'กำลังขอภาพจากกล้อง… (อาจใช้เวลาราว 10–40 วินาที)'
 export const CCTV_TAP_TO_LOAD_TH = 'แตะเพื่อโหลดภาพ (~50 KB ต่อภาพ)'
 export const CCTV_NOT_FLOOD_SIGNAL_TH = 'ไม่ได้แปลว่าไม่มีน้ำท่วม'
 export const CCTV_PAUSE_TH = 'หยุดรีเฟรชภาพกล้อง'
@@ -29,9 +32,66 @@ export const CCTV_RESUME_TH = 'รีเฟรชต่อ'
 export const CCTV_OTHER_AGENCIES_TH = 'กล้องจากหน่วยงานอื่น'
 export const CCTV_CHAIN_TH = 'กล้องแม่น้ำเจ้าพระยา'
 export const CCTV_OUTSIDE_TH = 'นอกรัศมี'
+/**
+ * Note of the "กล้องจากหน่วยงานอื่น" disclosure. It must stay true when this server also shows
+ * stills from a listed agency (DWR), so it only says where the links go.
+ */
+export const CCTV_LINKS_NOTE_TH = 'ดูกล้องเพิ่มเติมได้ที่เว็บของหน่วยงานโดยตรง (เปิดในแท็บใหม่)'
 
-/** Why the last still request failed. */
-export type FrameFailure = 'unreachable' | 'timeout' | 'no-image' | 'budget' | 'rate' | 'not-found'
+/** "ภาพนิ่ง ... อัปเดตราวทุก 1–3 นาที" for cameras this server refreshes on demand (BMA, demo). */
+const ON_DEMAND_CADENCE_TH = 'อัปเดตราวทุก 1–3 นาที'
+
+function cadenceTh(min: number): string {
+  return `ถ่ายภาพราวทุก ${min} นาที`
+}
+
+/**
+ * Card subtitle that is true for the cameras shown: BMA stills are fetched on demand (tiles every
+ * 3 min, the viewer every minute); DWR stations upload a still about every 15 min (cadenceMin).
+ * Without any still on this server it only promises links.
+ */
+export function cardSubtitleTh(cameras: readonly Pick<PublicCamera, 'media' | 'cadenceMin' | 'owner'>[]): string {
+  const images = cameras.filter((c) => c.media === 'image')
+  if (images.length === 0) return `ลิงก์ไปยังกล้องของหน่วยงาน — ใช้ดูประกอบเท่านั้น ${CCTV_STATUS_FROM_SENSORS_TH}`
+  const onDemand = images.some((c) => !c.cadenceMin)
+  // Cameras with an agency upload cadence, by cadence (owners in display order).
+  const timed = new Map<number, string[]>()
+  for (const c of images) {
+    if (!c.cadenceMin) continue
+    const owners = timed.get(c.cadenceMin) ?? []
+    if (!owners.includes(c.owner)) owners.push(c.owner)
+    timed.set(c.cadenceMin, owners)
+  }
+  const groups = [...timed.entries()].sort((a, b) => a[0] - b[0])
+  let cadence: string
+  if (!onDemand) cadence = groups.map(([min]) => cadenceTh(min)).join(' / ')
+  else if (groups.length === 0) cadence = ON_DEMAND_CADENCE_TH
+  else cadence = `${ON_DEMAND_CADENCE_TH} (${groups.map(([min, owners]) => `กล้อง${owners.join(' ')} ${cadenceTh(min)}`).join(' · ')})`
+  return `ภาพนิ่งจากกล้องของหน่วยงาน ${cadence} — ใช้ดูประกอบเท่านั้น ${CCTV_STATUS_FROM_SENSORS_TH}`
+}
+
+/** /map status of the camera layer: "แตะเพื่อดูภาพนิ่ง" only when this server has stills. */
+export function mapCamerasStatusTh(sites: readonly Pick<CameraSite, 'cameras'>[]): string {
+  const n = sites.length.toLocaleString('th-TH')
+  const images = sites.some((s) => s.cameras.some((c) => c.media === 'image' && !!c.imageUrl))
+  return `${n} จุดกล้อง · ${images ? 'แตะเพื่อดูภาพนิ่ง' : 'แตะเพื่อเปิดเว็บของหน่วยงาน'}`
+}
+
+/**
+ * Why the last still request failed (GET /api/cctv/image error contract, docs/DESIGN.md):
+ * - unreachable: 502 'unreachable' / network error; timeout: our own watchdog;
+ * - no-image: 502 'no-image' (or an empty / undecodable body);
+ * - budget: 503 'busy' | 'budget' (shared queue or hourly budget; Retry-After);
+ * - limited: 429 'limited' (this client asked too often; Retry-After);
+ * - unavailable: 503 'unavailable' (this server cannot fetch the source right now; Retry-After)
+ *   or 404 (camera no longer listed): the camera is link-only for now, so stop polling and
+ *   reload the camera list.
+ */
+export type FrameFailure = 'unreachable' | 'timeout' | 'no-image' | 'budget' | 'limited' | 'unavailable'
+
+/** Failure-time link-only copy: unlike a configured link-only camera it follows a failure, so it says it is no flood signal. */
+export const CCTV_UNAVAILABLE_TH = `เซิร์ฟเวอร์นี้แสดงภาพกล้องนี้ไม่ได้ในขณะนี้ — เปิดดูที่เว็บของหน่วยงาน · ${CCTV_NOT_FLOOD_SIGNAL_TH}`
+export const CCTV_LIMITED_TH = 'ขอภาพบ่อยเกินไป — รอสักครู่'
 
 const FAILURE_TH: Record<FrameFailure, { notice: string; badge: string }> = {
   unreachable: { notice: `ติดต่อกล้องไม่ได้ในขณะนี้ — ${CCTV_NOT_FLOOD_SIGNAL_TH}`, badge: 'ติดต่อกล้องไม่ได้' },
@@ -41,19 +101,24 @@ const FAILURE_TH: Record<FrameFailure, { notice: string; badge: string }> = {
     notice: 'มีผู้ขอภาพจำนวนมาก ระบบพักการดึงภาพชั่วคราวเพื่อไม่รบกวนเซิร์ฟเวอร์ของหน่วยงาน',
     badge: 'พักการดึงภาพชั่วคราว',
   },
-  rate: { notice: 'ขอภาพบ่อยเกินไป กรุณารอสักครู่แล้วระบบจะลองใหม่', badge: 'รอสักครู่' },
-  'not-found': { notice: 'ไม่พบกล้องนี้ในรายการของเซิร์ฟเวอร์แล้ว', badge: 'ไม่พบกล้อง' },
+  limited: { notice: CCTV_LIMITED_TH, badge: 'รอสักครู่' },
+  unavailable: { notice: CCTV_UNAVAILABLE_TH, badge: 'ดูที่เว็บหน่วยงาน' },
 }
 
 export function failureTh(f: FrameFailure): string {
   return FAILURE_TH[f].notice
 }
 
+/** The camera has turned link-only on this server (stop polling, reload the camera list). */
+export function isLinkOnlyFailure(f: FrameFailure | null | undefined): boolean {
+  return f === 'unavailable'
+}
+
 /** Failure from an image response (status + the JSON `{ error, reason }` body, when any). */
 export function failureFromResponse(status: number, body: unknown): FrameFailure {
   const reason = body && typeof body === 'object' ? (body as Record<string, unknown>).reason : null
-  if (status === 404) return 'not-found'
-  if (status === 429) return 'rate'
+  if (reason === 'unavailable' || status === 404) return 'unavailable'
+  if (status === 429 || reason === 'limited') return 'limited'
   if (status === 503) return 'budget'
   if (reason === 'no-image') return 'no-image'
   return 'unreachable'
@@ -150,33 +215,52 @@ export interface FrameCopy {
   /** The picture is not current: show it dimmed. */
   dim: boolean
   warn: boolean
+  /** This server shows no (more) stills of this camera: link to the agency instead. */
+  linkOnly: boolean
 }
 
 function clock(ms: number): string {
   return `${bkkTime(ms)} น.`
 }
 
+const BKK_OFFSET_MS = 7 * 60 * MIN
+const DAY_MS = 24 * 60 * MIN
+
+/** Bangkok calendar day number (UTC+7, no DST). */
+function bkkDay(ms: number): number {
+  return Math.floor((ms + BKK_OFFSET_MS) / DAY_MS)
+}
+
+/** "10:42 น." for a time today (Bangkok), "3 ต.ค. 23:58 น." for any other day. */
+export function whenTh(ms: number, nowMs: number): string {
+  return bkkDay(ms) === bkkDay(nowMs) ? clock(ms) : `${bkkDayMonth(ms)} ${clock(ms)}`
+}
+
 /** Thai labels for a camera's still. `link` cameras have no still on this server. */
 export function frameCopy(cam: CamLike & Pick<PublicCamera, 'media'>, s: FrameStatus, nowMs: number): FrameCopy {
   const demo = cam.source === 'demo-cam'
   if (cam.media === 'link') {
-    return { badge: 'ดูที่เว็บหน่วยงาน', line: null, notices: [CCTV_LINK_ONLY_TH], live: '', dim: false, warn: false }
+    return { badge: 'ดูที่เว็บหน่วยงาน', line: null, notices: [CCTV_LINK_ONLY_TH], live: '', dim: false, warn: false, linkOnly: true }
   }
+  const linkOnly = isLinkOnlyFailure(s.failure)
   if (!s.meta) {
     if (s.failure) {
       const f = FAILURE_TH[s.failure]
-      return { badge: f.badge, line: null, notices: [f.notice], live: f.notice, dim: false, warn: true }
+      return { badge: f.badge, line: null, notices: [f.notice], live: f.notice, dim: false, warn: !linkOnly, linkOnly }
     }
-    if (s.loading) return { badge: 'กำลังขอภาพ…', line: null, notices: [CCTV_LOADING_TH], live: '', dim: false, warn: false }
-    if (s.tapToLoad) return { badge: 'แตะเพื่อโหลดภาพ', line: null, notices: [CCTV_TAP_TO_LOAD_TH], live: '', dim: false, warn: false }
-    return { badge: 'รอโหลดภาพ', line: null, notices: [], live: '', dim: false, warn: false }
+    const none = { line: null, live: '', dim: false, warn: false, linkOnly: false }
+    if (s.loading) return { ...none, badge: 'กำลังขอภาพ…', notices: [CCTV_LOADING_TH] }
+    if (s.tapToLoad) return { ...none, badge: 'แตะเพื่อโหลดภาพ', notices: [CCTV_TAP_TO_LOAD_TH] }
+    return { ...none, badge: 'รอโหลดภาพ', notices: [] }
   }
 
   const m = s.meta
   const t = frameTime(m)
   const captured = m.capturedAt !== null
   const cond = frameCondition(m, cam, nowMs)
-  const when = cond === 'old' ? `${bkkDayMonth(t)} ${clock(t)}` : clock(t)
+  // The date is added whenever the still is not from today (Bangkok), so an old picture never
+  // reads as today's.
+  const when = whenTh(t, nowMs)
   const verb = captured ? 'ถ่าย' : demo ? 'สร้างภาพ' : 'ได้ภาพ'
   const line = `${demo ? 'ภาพจำลอง' : 'ภาพนิ่ง'} · ${verb} ${when} · ${formatAgeTh(new Date(t).toISOString(), new Date(nowMs))}`
   const notices: string[] = []
@@ -191,32 +275,40 @@ export function frameCopy(cam: CamLike & Pick<PublicCamera, 'media'>, s: FrameSt
     dim = true
     warn = true
   } else if (cond === 'stale') {
-    badge = `ภาพเก่า · ${clock(t)}`
-    notices.push(`ภาพนี้ไม่ใช่ภาพปัจจุบัน — ภาพล่าสุดเมื่อ ${clock(t)}`)
+    badge = `ภาพเก่า · ${when}`
+    notices.push(`ภาพนี้ไม่ใช่ภาพปัจจุบัน — ภาพล่าสุดเมื่อ ${when}`)
     live = 'ภาพจากกล้องนี้ไม่ใช่ภาพปัจจุบัน'
     dim = true
     warn = true
   } else if (cond === 'frozen') {
-    badge = `ภาพอาจค้าง · ${clock(t)}`
-    notices.push(`ภาพไม่เปลี่ยนตั้งแต่ ${clock(m.changedAt ?? t)} — กล้องอาจค้าง`)
+    badge = `ภาพอาจค้าง · ${when}`
+    notices.push(`ภาพไม่เปลี่ยนตั้งแต่ ${whenTh(m.changedAt ?? t, nowMs)} — กล้องอาจค้าง`)
     live = 'ภาพจากกล้องนี้ไม่เปลี่ยน กล้องอาจค้าง'
     warn = true
   } else {
-    badge = `${demo ? 'ภาพจำลอง' : captured ? 'ถ่าย' : 'ภาพนิ่ง'} · ${clock(t)}`
+    badge = `${demo ? 'ภาพจำลอง' : captured ? 'ถ่าย' : 'ภาพนิ่ง'} · ${when}`
   }
   if (s.failure) {
     notices.push(FAILURE_TH[s.failure].notice)
     live = FAILURE_TH[s.failure].notice
     warn = true
   }
+  if (linkOnly) {
+    // No newer still will come: keep the last one only dimmed, labelled with its time.
+    if (cond !== 'old') badge = `ภาพล่าสุด · ${when}`
+    dim = true
+  }
   if (demo) notices.unshift(CCTV_DEMO_TH)
-  return { badge, line, notices, live, dim, warn }
+  return { badge, line, notices, live, dim, warn, linkOnly }
 }
 
-/** Alt text: who, which camera and when — never what the picture shows (flooded or not). */
-export function cameraAltTh(cam: Pick<PublicCamera, 'name' | 'owner' | 'source'>, meta: FrameMeta): string {
+/**
+ * Alt text: who, which camera and when (with the date when not from today) — never what the
+ * picture shows (flooded or not).
+ */
+export function cameraAltTh(cam: Pick<PublicCamera, 'name' | 'owner' | 'source'>, meta: FrameMeta, nowMs: number): string {
   const verb = meta.capturedAt !== null ? 'ถ่ายเมื่อ' : 'ได้ภาพเมื่อ'
-  const base = `ภาพจากกล้อง ${cam.name} (${cam.owner}) ${verb} ${clock(frameTime(meta))}`
+  const base = `ภาพจากกล้อง ${cam.name} (${cam.owner}) ${verb} ${whenTh(frameTime(meta), nowMs)}`
   return cam.source === 'demo-cam' ? `${base} — ${CCTV_DEMO_TH}` : base
 }
 
@@ -224,7 +316,12 @@ export function cameraAltTh(cam: Pick<PublicCamera, 'name' | 'owner' | 'source'>
 
 /** Abort reason used by the request watchdog. */
 export const WATCHDOG_REASON = 'cctv-watchdog'
-export const WATCHDOG_MS = 25_000
+/**
+ * The client gives up on a still after this long. It must exceed the server's longest image
+ * request (CCTV_SERVER_MAX_MS: queue wait + upstream fetch), or a slow but successful frame is
+ * shown as unreachable while the server still pays for it.
+ */
+export const WATCHDOG_MS = 50_000
 
 export interface FrameDeps {
   fetch: typeof fetch
@@ -315,16 +412,21 @@ export interface RefreshConditions {
   paused: boolean
   /** navigator.connection.saveData. */
   saveData: boolean
+  /** The camera viewer is open over the page (full screen on phones): the tiles are covered. */
+  viewerOpen?: boolean
 }
 
-/** Tiles auto-refresh only on screen, in a visible tab, not paused and not under Save-Data. */
+/**
+ * Tiles auto-refresh only on screen, in a visible tab, not paused, not under Save-Data and not
+ * behind the open viewer (IntersectionObserver does not see the modal's top layer).
+ */
 export function tileAutoRefresh(c: RefreshConditions): boolean {
-  return c.onScreen && c.visible && !c.paused && !c.saveData
+  return c.onScreen && c.visible && !c.paused && !c.saveData && !c.viewerOpen
 }
 
-/** A tile loads its first still once on screen; under Save-Data only after a tap. */
-export function tileMayLoad(c: Pick<RefreshConditions, 'onScreen' | 'saveData'> & { tapped: boolean }): boolean {
-  return c.tapped || (c.onScreen && !c.saveData)
+/** A tile loads its first still once on screen (not behind the viewer); under Save-Data only after a tap. */
+export function tileMayLoad(c: Pick<RefreshConditions, 'onScreen' | 'saveData' | 'viewerOpen'> & { tapped: boolean }): boolean {
+  return c.tapped || (c.onScreen && !c.saveData && !c.viewerOpen)
 }
 
 /** An open viewer refreshes while visible, not paused (own or auto) and not under Save-Data. */
@@ -344,6 +446,76 @@ export function nextAttemptDelay(lastFinishedAt: number | null, intervalMs: numb
   if (lastFinishedAt === null) return 0
   const wait = Math.max(intervalMs, (retryAfter ?? 0) * 1000)
   return Math.max(0, lastFinishedAt + wait - nowMs)
+}
+
+/**
+ * Milliseconds a manual "load now" must wait: none, unless the server asked to retry after a
+ * while (429 limited, 503 busy/budget/unavailable), which a tap must honour too.
+ */
+export function reloadDelay(lastFinishedAt: number | null, retryAfter: number | null, nowMs: number): number {
+  if (lastFinishedAt === null || !retryAfter) return 0
+  return Math.max(0, lastFinishedAt + retryAfter * 1000 - nowMs)
+}
+
+/**
+ * Retry-After holds shared by every still on the page: a 429 'limited' is about this client, so
+ * it holds every camera; a 503 'busy' | 'budget' | 'unavailable' is about one source. While a
+ * hold runs no tile or viewer asks again (a newly opened viewer shows the state at once).
+ */
+export type RetryHolds = Map<string, { until: number; failure: FrameFailure }>
+
+/** The scope a Retry-After applies to ("client", "source:<id>"), or null. */
+export function retryScope(failure: FrameFailure, imageUrl: string): string | null {
+  if (failure === 'limited') return 'client'
+  if (failure !== 'budget' && failure !== 'unavailable') return null
+  const m = /^\/api\/cctv\/image\/([^/?#]+)\//.exec(imageUrl)
+  return m ? `source:${m[1]}` : null
+}
+
+/** Record a failure's Retry-After (only when the server sent one). */
+export function noteRetryHold(holds: RetryHolds, failure: FrameFailure, imageUrl: string, retryAfter: number | null, nowMs: number): void {
+  const scope = retryScope(failure, imageUrl)
+  if (!scope || !retryAfter) return
+  const until = nowMs + retryAfter * 1000
+  const prev = holds.get(scope)
+  if (!prev || prev.until < until) holds.set(scope, { until, failure })
+}
+
+/** The hold that keeps `imageUrl` from being requested now (the longest), or null. */
+export function activeHold(holds: RetryHolds, imageUrl: string, nowMs: number): { waitMs: number; failure: FrameFailure } | null {
+  let best: { waitMs: number; failure: FrameFailure } | null = null
+  for (const scope of ['client', retryScope('budget', imageUrl)]) {
+    const h = scope ? holds.get(scope) : undefined
+    if (!h) continue
+    if (h.until <= nowMs) {
+      holds.delete(scope!)
+      continue
+    }
+    if (!best || h.until - nowMs > best.waitMs) best = { waitMs: h.until - nowMs, failure: h.failure }
+  }
+  return best
+}
+
+/**
+ * After a still turned link-only ("unavailable"), automatic attempts wait at least this long
+ * even when Retry-After is shorter or missing: the camera list reload is what switches the tile.
+ */
+export const UNAVAILABLE_MIN_RETRY_SEC = 300
+
+/** The camera list is reloaded at most this often when stills turn link-only. */
+export const LIST_RELOAD_MIN_GAP_MS = 20_000
+
+/**
+ * Coalesces "reload the camera list" requests (several tiles fail at once): returns true when a
+ * reload may start now and records it.
+ */
+export function listReloadGate(minGapMs = LIST_RELOAD_MIN_GAP_MS): (nowMs: number) => boolean {
+  let last = -Infinity
+  return (nowMs) => {
+    if (nowMs - last < minGapMs) return false
+    last = nowMs
+    return true
+  }
 }
 
 // --- global pause (per viewer, localStorage) ---------------------------------------------------

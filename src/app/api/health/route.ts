@@ -1,7 +1,7 @@
 import { cameraCatalogHealth } from '@/lib/cameras/catalog'
 import { getConfig, type AppConfig } from '@/lib/config'
 import { META_LAST_ALERTS, META_LAST_INGEST } from '@/lib/pipeline'
-import { canServeImages, cctvImageStats, isUpstreamCameraSource, type CctvSourceStats } from '@/lib/server/cctv-proxy'
+import { cctvImageAvailability, cctvImageStats, isUpstreamCameraSource, type CctvImagesOff, type CctvSourceStats } from '@/lib/server/cctv-proxy'
 import { json } from '@/lib/server/http'
 import { log } from '@/lib/server/log'
 import { getStore, type Store } from '@/lib/store'
@@ -19,8 +19,19 @@ interface CameraHealth {
   lastError: string | null
   /** This server serves stills for the source (else the UI links to the agency page). */
   images: boolean
-  /** Aggregate image-proxy counters (agency sources with images on this host only). */
-  frames1h: CctvSourceStats['frames1h'] | null
+  /**
+   * Why not (null while images is true): 'disabled' (CCTV_IMAGES=0), 'link-only' (catalogue
+   * without image references), 'host-unreachable' (this host never got a frame and was turned
+   * away; retried later) or 'agency-backoff' (the agency answered 429 / kept refusing).
+   */
+  imagesReason: CctvImagesOff | null
+  /** When the automatic fallback ends (host-unreachable / agency-backoff), ISO; else null. */
+  imagesUntil: string | null
+  /**
+   * Aggregate image-proxy counters for agency sources this host fetches stills for, also while
+   * a fallback is on. The remaining hourly budget is reported coarsely on purpose.
+   */
+  frames1h: (Omit<CctvSourceStats['frames1h'], 'budgetLeft'> & { budget: CctvSourceStats['budget'] }) | null
   lastFrame: CctvSourceStats['lastFrame']
 }
 
@@ -41,16 +52,19 @@ async function cameraHealth(store: Store, config: AppConfig): Promise<CameraHeal
     const rows = await cameraCatalogHealth(store, sources)
     return await Promise.all(
       rows.map(async (row): Promise<CameraHealth> => {
-        const images = await canServeImages(config, store, row.source)
-        const stats = images && isUpstreamCameraSource(row.source) ? cctvImageStats(row.source) : null
+        const a = await cctvImageAvailability(config, store, row.source)
+        const fetching = a.images || a.reason === 'host-unreachable' || a.reason === 'agency-backoff'
+        const stats = fetching && isUpstreamCameraSource(row.source) ? cctvImageStats(row.source) : null
         return {
           source: row.source,
           ok: row.catalogAt !== null && !row.lastError,
           catalogAt: row.catalogAt,
           count: row.count,
           lastError: row.lastError ? scrubError(row.lastError) : null,
-          images,
-          frames1h: stats?.frames1h ?? null,
+          images: a.images,
+          imagesReason: a.reason,
+          imagesUntil: a.until !== null ? new Date(a.until).toISOString() : null,
+          frames1h: stats ? { ok: stats.frames1h.ok, fail: stats.frames1h.fail, refused: stats.frames1h.refused, budget: stats.budget } : null,
           lastFrame: stats?.lastFrame ?? null,
         }
       }),

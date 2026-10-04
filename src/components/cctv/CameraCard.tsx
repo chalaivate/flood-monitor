@@ -10,6 +10,7 @@ import {
   CCTV_PAUSE_TH,
   CCTV_RIGHTS_TH,
   cardQuery,
+  cardSubtitleTh,
   creditTh,
   groupSites,
   noCamerasTh,
@@ -23,7 +24,7 @@ import { CameraLinks } from './CameraFrame'
 import { IconCamera } from './CameraGlyph'
 import { CameraTile } from './CameraTile'
 import { setCctvPaused, useCctvPaused, useOnScreen, usePageVisible, useSaveData } from './hooks'
-import { openCameraViewer } from './viewer-store'
+import { openCameraViewer, useCameraViewerOpen } from './viewer-store'
 
 /** True when the server has camera sources switched on (otherwise the card is not shown). */
 export function camerasEnabled(data: CamerasResponse | null): data is CamerasResponse {
@@ -33,8 +34,8 @@ export function camerasEnabled(data: CamerasResponse | null): data is CamerasRes
 /**
  * Dashboard card "กล้อง CCTV ใกล้บ้าน": up to 4 camera sites around the place (2×2), sites
  * whose sensor is at "เฝ้าระวัง" or worse first, filled from beyond the radius up to 10 km.
- * Stills refresh every 3 min only while the card is on screen, the tab is visible, the global
- * pause is off and Save-Data is off. Pictures never affect status.
+ * Stills refresh every 3 min only while the card is on screen (and not behind the open viewer),
+ * the tab is visible, the global pause is off and Save-Data is off. Pictures never affect status.
  */
 export function CameraCard({
   data,
@@ -52,19 +53,21 @@ export function CameraCard({
   const visible = usePageVisible()
   const paused = useCctvPaused()
   const saveData = useSaveData()
+  // The open viewer (full screen on phones) covers the tiles; IntersectionObserver cannot tell.
+  const viewerOpen = useCameraViewerOpen()
   const [tapped, setTapped] = useState<ReadonlySet<string>>(() => new Set())
   const sites = useMemo(() => rankSites(groupSites(data.cameras), { radiusKm: place.radiusKm, sensors }), [data.cameras, place.radiusKm, sensors])
   const owners = ownersOf(sites.flatMap((s) => s.cameras))
   const listed = Object.values(data.catalogAt).some((t) => !!t)
   const chain = !!data.catalogAt['dwr-cctv']
-  const conditions = { onScreen, visible, paused, saveData }
+  const conditions = { onScreen, visible, paused, saveData, viewerOpen }
 
   return (
     <div ref={box}>
       <Card
         id="cctv"
         title={CCTV_CARD_TITLE}
-        subtitle={CCTV_CARD_SUBTITLE}
+        subtitle={sites.length > 0 ? cardSubtitleTh(sites.flatMap((s) => s.cameras)) : CCTV_CARD_SUBTITLE}
         action={
           sites.some((s) => s.cameras.some((c) => c.media === 'image')) ? (
             <button

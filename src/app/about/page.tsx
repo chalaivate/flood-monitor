@@ -199,7 +199,7 @@ function ExtLink({ href, children }: { href: string; children: ReactNode }) {
 }
 
 /** "ภาพจากกล้อง CCTV": sources, display conditions, privacy and the takedown contact. */
-function CameraSection({ demo, contactEmail }: { demo: boolean; contactEmail: string | null }) {
+function CameraSection({ demo, contactEmail, siteHost }: { demo: boolean; contactEmail: string | null; siteHost: string | null }) {
   return (
     <Section id="cctv" title="ภาพจากกล้อง CCTV">
       <p>แอปนี้แสดงภาพนิ่งจากกล้องของหน่วยงานรัฐ เพื่อช่วยดูสภาพน้ำบนถนนและในแม่น้ำใกล้บ้าน ประกอบกับข้อมูลระดับน้ำ</p>
@@ -239,7 +239,10 @@ function CameraSection({ demo, contactEmail }: { demo: boolean; contactEmail: st
           ไม่บันทึกลงดิสก์หรือฐานข้อมูล ไม่มีภาพย้อนหลัง ไม่ขยายภาพ และไม่ใช้ระบบจดจำใบหน้าหรือป้ายทะเบียนรถ
         </li>
         <li>ระบบไม่บันทึกว่าผู้ใช้คนใดเปิดดูกล้องใด</li>
-        <li>ภาพใช้ประกอบการดูสถานการณ์เท่านั้น สถานะและการแจ้งเตือนคำนวณจากระยะห่างตลิ่งของสถานีวัดระดับน้ำ ไม่ได้มาจากภาพกล้อง</li>
+        <li>
+          ภาพใช้ประกอบการดูสถานการณ์เท่านั้น สถานะและการแจ้งเตือนมาจากเซ็นเซอร์วัดน้ำ (ระยะห่างตลิ่งของคลองและแม่น้ำ
+          หรือความลึกน้ำบนถนน) ไม่ได้มาจากภาพกล้อง
+        </li>
         <li>
           กล้องที่ติดต่อไม่ได้ ภาพค้าง หรือภาพเก่า <strong className="font-medium text-text">ไม่ได้แปลว่าไม่มีน้ำท่วม</strong>
         </li>
@@ -247,13 +250,24 @@ function CameraSection({ demo, contactEmail }: { demo: boolean; contactEmail: st
         <li>
           หากพบภาพที่กระทบความเป็นส่วนตัว หรือหน่วยงานเจ้าของกล้องต้องการให้หยุดแสดงภาพ ติดต่อ{' '}
           {contactEmail ? (
-            <a href={`mailto:${contactEmail}`} className="text-text underline underline-offset-4">
-              {contactEmail}
-            </a>
+            <>
+              <a href={`mailto:${contactEmail}`} className="text-text underline underline-offset-4">
+                {contactEmail}
+              </a>{' '}
+              — เราจะปิดการแสดงภาพจากแหล่งนั้นทันที
+            </>
           ) : (
-            'ผู้ดูแลเว็บไซต์นี้'
-          )}{' '}
-          — เราจะปิดการแสดงภาพจากแหล่งนั้นทันที
+            // No address configured: say so, and never invent one. The site name (from the
+            // operator's own PUBLIC_BASE_URL) at least tells whose server this is.
+            <>
+              ผู้ดูแลเว็บไซต์นี้{siteHost ? ` (${siteHost})` : ''} — ผู้ดูแลยังไม่ได้ระบุช่องทางติดต่อ ระหว่างนี้แจ้งหน่วยงานเจ้าของกล้องได้โดยตรง
+              (กล้อง กทม.: สายด่วน{' '}
+              <a href="tel:1555" className="text-text underline underline-offset-4">
+                1555
+              </a>
+              )
+            </>
+          )}
         </li>
       </ul>
       <p className="text-sm">
@@ -268,6 +282,17 @@ function CameraSection({ demo, contactEmail }: { demo: boolean; contactEmail: st
       </p>
     </Section>
   )
+}
+
+/** Host of the operator's PUBLIC_BASE_URL (http/https only), shown with the contact fallback. */
+function siteHostOf(v: string | undefined): string | null {
+  if (!v) return null
+  try {
+    const u = new URL(v)
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.host : null
+  } catch {
+    return null
+  }
 }
 
 /** Plain address only (it is rendered into a mailto: link). */
@@ -437,7 +462,13 @@ export default async function AboutPage() {
         </ul>
       </Section>
 
-      {cameraSources.length > 0 && <CameraSection demo={cameraSources.includes('demo-cam')} contactEmail={contactEmailOf(cfg.CONTACT_EMAIL)} />}
+      {cameraSources.length > 0 && (
+        <CameraSection
+          demo={cameraSources.includes('demo-cam')}
+          contactEmail={contactEmailOf(cfg.CONTACT_EMAIL)}
+          siteHost={siteHostOf(cfg.PUBLIC_BASE_URL)}
+        />
+      )}
 
       <Section id="privacy" title="ความเป็นส่วนตัว">
         <ul className="list-disc space-y-1 pl-5">

@@ -11,7 +11,7 @@ import {
 } from '@/lib/server/cctv-proxy'
 import { lateFetch } from '@/lib/server/context'
 import { clientIp, handler, json, type RouteCtx } from '@/lib/server/http'
-import { enforceClientLimit, LIMITS } from '@/lib/server/rate-limit'
+import { ipBucket, LIMITS, takeClientLimit } from '@/lib/server/rate-limit'
 import { getStore } from '@/lib/store'
 
 export const runtime = 'nodejs'
@@ -27,19 +27,32 @@ function cctvError(status: number, error: string, reason: string, headers: Recor
 /**
  * GET /api/cctv/image/[source]/[file] → the latest still of one camera.
  * `file` is `<nativeId>.jpg` (`<nativeId>.svg` for the simulated demo-cam source).
- * Checked in order before any upstream request: the source serves images on this host, the
- * camera is in the catalogue (404 ไม่พบกล้องนี้), the per-IP limit (429). Then the shared cache /
- * single-flight upstream fetch: 502 when the camera cannot be reached or has no image, 503 when
- * the per-source concurrency or hourly budget is spent. The last good frame is served with
- * `X-Cctv-Stale: 1` for a while when the upstream fails.
+ * Errors are Thai JSON `{ error, reason }`. Checked in order, none of it asking upstream:
+ * - 404 `not-found`: unknown source or camera;
+ * - 503 `unavailable` + Retry-After: a listed camera whose stills this server cannot fetch right
+ *   now (stills switched off, link-only catalogue, host fallback, agency backoff): link out;
+ * - 429 `limited` + Retry-After: the per-IP request limit.
+ * Then the shared cache / single-flight upstream fetch, where a cache miss also spends the
+ * client's miss budget (429 `limited`); 502 `unreachable` | `no-image`; 503 `busy` | `budget`
+ * (shared queue or hourly budget) or `unavailable` (the source went off meanwhile). The last
+ * good frame is served with `X-Cctv-Stale: 1` for a while instead of most failures.
  */
 export const GET = handler('cctv image', async (req: Request, ctx: RouteCtx<{ source: string; file: string }>) => {
   const { source, file } = await ctx.params
   const config = getConfig()
   const store = await getStore()
   const hit = await resolveCctvCamera(config, store, source, file)
-  if (!hit) return cctvError(404, CCTV_MSG.notFound, 'not-found')
-  enforceClientLimit('cctvImage', clientIp(req), LIMITS.cctvImage)
+  if (hit.kind === 'not-found') return cctvError(404, CCTV_MSG.notFound, 'not-found')
+  if (hit.kind === 'unavailable') {
+    const f = cctvFailure('unavailable', hit.retryAfterSec)
+    return cctvError(f.status, f.message, 'unavailable', f.headers)
+  }
+  const ip = clientIp(req)
+  const limit = takeClientLimit('cctvImage', ip, LIMITS.cctvImage)
+  if (!limit.ok) {
+    const f = cctvFailure('limited', limit.retryAfterSec)
+    return cctvError(f.status, f.message, 'limited', f.headers)
+  }
 
   const { camera, ref } = hit
   if (camera.source === 'demo-cam') {
@@ -58,8 +71,14 @@ export const GET = handler('cctv image', async (req: Request, ctx: RouteCtx<{ so
   }
   if (!isUpstreamCameraSource(camera.source) || !ref) return cctvError(404, CCTV_MSG.notFound, 'not-found')
 
-  const res = await getCctvImage(camera.source, camera.id, ref, { fetch: lateFetch, publicBaseUrl: config.PUBLIC_BASE_URL })
+  const res = await getCctvImage(camera.source, camera.id, ref, {
+    fetch: lateFetch,
+    publicBaseUrl: config.PUBLIC_BASE_URL,
+    // No per-client accounting without a trusted client IP (TRUST_PROXY=none).
+    client: ip === 'unknown' ? null : ipBucket(ip),
+    signal: req.signal,
+  })
   if (res.ok) return cctvFrameResponse(res.frame, res.stale, res.ttlMs)
-  const f = cctvFailure(res.failure)
+  const f = cctvFailure(res.failure, res.retryAfterSec)
   return cctvError(f.status, f.message, res.failure, f.headers)
 })

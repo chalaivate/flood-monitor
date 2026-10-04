@@ -53,13 +53,14 @@ export function CameraTile({
   })
   const tapToLoad = image && conditions.saveData && !tapped && !frame.meta
   const copy = frameCopy(cam, { meta: frame.meta, loading: frame.loading, failure: frame.failure, tapToLoad }, nowMs)
-  const notice = copy.warn || cam.media === 'link' ? copy.notices.filter((n) => n !== CCTV_DEMO_TH).at(-1) : null
+  const notice = copy.warn || copy.linkOnly ? copy.notices.filter((n) => n !== CCTV_DEMO_TH).at(-1) : null
   const sensor = site.sensor
   const label = tapToLoad ? `โหลดภาพกล้อง ${site.name} (~50 KB)` : `เปิดดูกล้อง ${site.name} · ${copy.badge}`
 
   return (
     <li className="min-w-0">
-      <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card-2">
+      {/* fm-cam-tile: the focus ring is drawn on the card, the button's own would be clipped. */}
+      <article className="fm-cam-tile flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card-2">
         <button
           type="button"
           className="block w-full text-left"
@@ -76,6 +77,7 @@ export function CameraTile({
             frame={frame}
             copy={copy}
             size="tile"
+            nowMs={nowMs}
             overlay={
               site.cameras.length > 1 ? (
                 <span aria-hidden="true" className="absolute top-1.5 left-1.5 rounded-md bg-black/75 px-1.5 py-0.5 text-[0.7rem] text-white">

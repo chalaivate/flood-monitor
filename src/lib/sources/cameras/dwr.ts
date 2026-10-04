@@ -1,13 +1,15 @@
-import type { Camera, CameraCatalogResult, CameraRef } from '../../types'
+import type { Camera, CameraCatalog, CameraCatalogResult, CameraRef } from '../../types'
 import { BROWSER_UA, HttpError } from '../http'
-import type { SourceContext } from '../types'
-import type { CameraCatalogAdapter } from './types'
+import type { CameraCatalogAdapter, CameraCatalogContext } from './types'
 import { cleanName, fetchCatalogJson, inBox, pointIn, siteIdFor, type BBox } from './common'
 
 // River cameras at DWR telemetry stations (กรมทรัพยากรน้ำ, telemetry.dwr.go.th). The list has no
 // coordinates, so each station is looked up by code (~200 ms apart). List rows embed camera
 // links with user:pass@… credentials: rows are read through an allowlist, never spread, stored
 // or logged. Scope: the central plains (Chao Phraya main stem, Pasak, Tha Chin, Bang Pakong).
+// A station whose lookup fails keeps its last known position (stations do not move), so a
+// transient error never drops a camera from the weekly list; too many failures without a known
+// position fail the refresh instead (the last good list stays in use, retried with backoff).
 
 export const DWR_ORIGIN = 'https://telemetry.dwr.go.th'
 export const DWR_LIST_URL = `${DWR_ORIGIN}/api/public/reportCctv/listPaginate`
@@ -19,6 +21,12 @@ export const DWR_PAGE_SIZE = 200
 const DWR_MAX_PAGES = 5
 /** Spacing between station lookups. */
 export const DWR_LOOKUP_SPACING_MS = 200
+/**
+ * Lookups that may fail (with no last known position to fall back on) before the whole refresh
+ * counts as failed: max(this, 10 % of the lookups). A few new stations without a position are
+ * skipped instead, so one permanently broken station cannot block every refresh.
+ */
+export const DWR_MAX_UNRESOLVED_LOOKUPS = 2
 /** Stills arrive about every 15 minutes. */
 const DWR_CADENCE_MIN = 15
 
@@ -115,9 +123,23 @@ export function inDwrScope(item: DwrListItem): boolean | null {
 const JSON_HEADERS = { 'User-Agent': BROWSER_UA, 'Content-Type': 'application/json' }
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+/** Station code → position from the list in use before this refresh (first camera per code). */
+function knownPositions(previous: CameraCatalog | null | undefined): Map<string, { lat: number; lng: number }> {
+  const out = new Map<string, { lat: number; lng: number }>()
+  if (previous?.source !== 'dwr-cctv' || !Array.isArray(previous.cameras)) return out
+  for (const c of previous.cameras) {
+    const code = typeof c?.code === 'string' ? c.code.trim().toUpperCase() : ''
+    if (!STATION_CODE_RE.test(code) || out.has(code)) continue
+    const pos = pointIn(c.lat, c.lng, THAILAND_BBOX)
+    if (pos) out.set(code, pos)
+  }
+  return out
+}
+
 /** Fetch the list (paginated), keep the central plains, look up coordinates one by one. */
-export async function fetchDwrCatalog(ctx: SourceContext): Promise<CameraCatalogResult> {
+export async function fetchDwrCatalog(ctx: CameraCatalogContext): Promise<CameraCatalogResult> {
   const sleep = ctx.sleep ?? defaultSleep
+  const known = knownPositions(ctx.previous)
   const items: DwrListItem[] = []
   let malformed = 0
   let total: number | null = null
@@ -146,6 +168,7 @@ export async function fetchDwrCatalog(ctx: SourceContext): Promise<CameraCatalog
   let outOfScope = 0
   let noCoords = 0
   let lookupFailed = 0
+  let reused = 0
   let lookups = 0
   for (const item of items) {
     const scope = inDwrScope(item)
@@ -155,18 +178,29 @@ export async function fetchDwrCatalog(ctx: SourceContext): Promise<CameraCatalog
     }
     if (lookups++ > 0) await sleep(DWR_LOOKUP_SPACING_MS)
     let pos: { lat: number; lng: number } | null
+    let failed = false
     try {
       pos = parseDwrStationPoint(await fetchCatalogJson(ctx, dwrStationUrl(item.stationCode), { headers: { 'User-Agent': BROWSER_UA } }))
     } catch (err) {
       // A refusal means "stop hitting this host"; the last good list stays in use.
       if (err instanceof HttpError && (err.status === 429 || err.status === 403)) throw err
       if (ctx.signal?.aborted) throw err
-      lookupFailed++
-      continue
+      pos = null
+      failed = true
     }
     if (!pos) {
-      noCoords++
-      continue
+      // Stations do not move: keep the last known position rather than drop the camera.
+      const last = known.get(item.stationCode)
+      if (last) {
+        pos = last
+        reused++
+      } else if (failed) {
+        lookupFailed++
+        continue
+      } else {
+        noCoords++
+        continue
+      }
     }
     if (scope === null && !inBox(pos.lat, pos.lng, DWR_SCOPE_BBOX)) {
       outOfScope++
@@ -197,8 +231,13 @@ export async function fetchDwrCatalog(ctx: SourceContext): Promise<CameraCatalog
   if (cameras.length === 0) {
     throw new Error(`DWR camera list: no usable camera (${items.length} listed, ${outOfScope} out of scope, ${lookupFailed} lookups failed)`)
   }
+  // Many lookups failing at once is an outage, not a few odd stations: keep the last good list.
+  if (lookupFailed > Math.max(DWR_MAX_UNRESOLVED_LOOKUPS, Math.floor(lookups * 0.1))) {
+    throw new Error(`DWR camera list: station lookup failed for ${lookupFailed} of ${lookups} camera(s); kept the previous list`)
+  }
   const warnings: string[] = []
   if (malformed) warnings.push(`skipped ${malformed} malformed camera row(s)`)
+  if (reused) warnings.push(`kept the last known position of ${reused} camera(s) (station lookup failed or gave none)`)
   if (lookupFailed) warnings.push(`station lookup failed for ${lookupFailed} camera(s)`)
   if (noCoords) warnings.push(`skipped ${noCoords} camera(s) without coordinates`)
   if (total !== null && rowsSeen < total) warnings.push(`list truncated: ${rowsSeen} of ${total} row(s) read`)

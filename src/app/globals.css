@@ -105,6 +105,12 @@ body {
   color: var(--text);
 }
 
+/* In-page anchors (/about#cctv from the dashboard camera card) and focus scrolling land below
+   the sticky top bar (h-14 + 1px border = 57px) instead of under it. */
+html {
+  scroll-padding-top: calc(57px + 0.75rem);
+}
+
 body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
@@ -115,6 +121,21 @@ body {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Camera tiles: the full-width button sits flush in an overflow-hidden rounded card, which would
+   clip its outline to a thin line under the picture; draw the ring on the card instead. */
+.fm-cam-tile:has(> button:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.fm-cam-tile > button:focus-visible {
+  outline: none;
+}
+/* The viewer heading takes focus when the control that had it went away (tabindex -1). */
+#cam-viewer-title:focus-visible {
+  outline-offset: 0;
+  border-radius: 4px;
 }
 
 @media (prefers-reduced-motion: reduce) {

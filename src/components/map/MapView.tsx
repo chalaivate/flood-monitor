@@ -9,6 +9,7 @@ import {
   CAMERA_LIST_REFRESH_MS,
   camerasAtStation,
   groupSites,
+  mapCamerasStatusTh,
   sensorFromMapStation,
   sensorIndex,
   sitesNear,
@@ -27,6 +28,7 @@ import { loadRadarFrames, type RadarFrame } from '@/lib/ui/rainviewer'
 import { countByFilter, DEFAULT_KIND_FILTERS, filterStations, KIND_FILTERS, useStations, type KindFilter } from '@/lib/ui/stations'
 import { IconCamera } from '../cctv/CameraGlyph'
 import { CameraViewer } from '../cctv/CameraViewer'
+import { useCameraListReload } from '../cctv/hooks'
 import { openCameraViewer } from '../cctv/viewer-store'
 import { IconCheck, IconChevronRight, IconLayers, IconMapPin, IconRefresh } from '../icons'
 import { LevelDot } from '../LevelBadge'
@@ -85,6 +87,8 @@ export function MapView() {
   const [camPref, setCamPref] = useState<boolean | null>(null)
   const camLayer = camPref ?? urlCams
   const camList = usePolled<CamerasResponse>(camPref !== null || urlCams ? 'cctv:all' : null, (signal) => fetchCameras(null, { signal }), CAMERA_LIST_REFRESH_MS)
+  // A still that turned link-only (viewer) reloads the list, so markers and popups follow.
+  useCameraListReload(camList.refresh)
   const camData = camList.data
   const camSites = useMemo(() => groupSites(camData?.cameras ?? []), [camData])
   const stationCameraCount = useMemo(() => {
@@ -257,7 +261,7 @@ export function MapView() {
                   (camData
                     ? camEnabled
                       ? camSites.length > 0
-                        ? `${camSites.length.toLocaleString('th-TH')} จุดกล้อง · แตะเพื่อดูภาพนิ่ง`
+                        ? mapCamerasStatusTh(camSites)
                         : 'เซิร์ฟเวอร์นี้ยังไม่มีรายการกล้อง'
                       : 'เซิร์ฟเวอร์นี้ไม่ได้เปิดใช้ภาพกล้อง'
                     : camList.error

@@ -1,3 +1,4 @@
+import { hostname } from 'node:os'
 import type { AppConfig } from '../config'
 import { isInThailand } from '../geo'
 import { CAMERA_ADAPTERS, getCameraSources } from '../sources/cameras'
@@ -16,7 +17,8 @@ import { joinNearStations, stationJoinKey } from './join'
 //   cctv:refs:<src>     server-only {fetchedAt, refs}; '' when this host did not fetch the list
 //   cctv:index:<src>    small index {version, fetchedAt, joinedAt, joinKey, count, local}; written
 //                       last, so it is the commit point readers check before the big list
-//   cctv:status:<src>   refresh bookkeeping {lastAttemptAt, lastSuccessAt, lastError, failures, shrink}
+//   cctv:status:<src>   refresh bookkeeping {lastAttemptAt, lastSuccessAt, lastError, failures, shrink,
+//                       hosts}; `hosts` keeps attempts per host for Thai-IP-only sources
 // Refs (BMA LiveStream addresses, DWR snapshot ids) never leave this module except through
 // getCameraRef(); they are never logged, relayed or put into an API response.
 
@@ -36,6 +38,10 @@ const MAX_FUTURE_SKEW_MS = 10 * 60_000
 export const CATALOG_REFRESH_DEADLINE_MS = 120_000
 /** Daily lists drift towards this Bangkok hour (quiet time upstream). */
 const PREFERRED_HOUR_BKK: Partial<Record<CameraSourceId, number>> = { 'bma-floodcam': 3 }
+/** A list at least this old is refetched in its preferred hour (so any fetch time drifts there). */
+const DRIFT_MIN_AGE_H = 1
+/** Hosts whose attempts are remembered per Thai-IP-only source (most recent first). */
+const MAX_TRACKED_HOSTS = 8
 
 const HOUR_MS = 3_600_000
 
@@ -50,6 +56,15 @@ export interface CameraCatalogDeps {
   sleep?: (ms: number) => Promise<void>
   /** Adapters to use instead of the configured ones (tests). */
   adapters?: CameraCatalogAdapter[]
+  /**
+   * Leave Thai-IP-only sources alone (hosts that may run outside Thailand, e.g. /api/cron/poll on
+   * serverless): their lists are kept and shown, but only a Thai host refreshes them.
+   */
+  skipThaiIpOnly?: boolean
+  /** Identifies this host in the per-host attempt bookkeeping (default: the OS hostname). */
+  hostId?: string
+  /** Whole-refresh deadline (default CATALOG_REFRESH_DEADLINE_MS; tests). */
+  deadlineMs?: number
 }
 
 export interface CameraCatalogReport {
@@ -74,18 +89,31 @@ interface CatalogIndex {
 interface ShrinkTrack {
   count: number
   firstSeenAt: string
+  /** Distinct lists (by fetchedAt) seen with about this count. */
   seen: number
+  /** fetchedAt of the last one counted: a list re-sent unchanged is not a new sighting. */
+  lastFetchedAt?: string
+}
+
+interface HostAttempt {
+  lastAttemptAt: string | null
+  failures: number
 }
 
 interface CatalogStatus {
-  /** Last refresh attempted by this host (relayed lists do not count). */
+  /** Last local refresh attempt (relayed lists do not count); any host for Thai-IP-only sources. */
   lastAttemptAt: string | null
   /** Last time a list was saved (fetched here or relayed). */
   lastSuccessAt: string | null
   lastError: string | null
-  /** Consecutive failed local refreshes (drives the retry backoff). */
+  /** Consecutive failed local refreshes (drives the retry backoff, except for Thai-IP-only sources). */
   failures: number
   shrink: ShrinkTrack | null
+  /**
+   * Thai-IP-only sources: attempts and backoff per host. A store can be shared (Supabase), and a
+   * host that cannot reach the source must never hold back the Thai host that can.
+   */
+  hosts?: Record<string, HostAttempt>
 }
 
 interface StoredCatalog extends CameraCatalog {
@@ -314,7 +342,8 @@ export async function hasCameraRefs(store: Store, source: CameraSourceId): Promi
 
 /**
  * Catalogue state for /api/health: when each list was fetched, how many cameras, and the last
- * refresh error (null once a list was saved since). Cheap (small meta keys only); never throws.
+ * refresh error (null once a list was saved since; a relayed list this server refused shows as
+ * "relay: …"). Cheap (small meta keys only); never throws.
  */
 export async function cameraCatalogHealth(
   store: Store,
@@ -334,30 +363,37 @@ export async function cameraCatalogHealth(
 
 // --- writing ---------------------------------------------------------------------------------
 
-type RefuseReason = 'invalid' | 'empty' | 'older' | 'local-fresh' | 'shrink'
+/** Why a list was not saved. */
+export type CatalogRefuseReason = 'invalid' | 'empty' | 'older' | 'local-fresh' | 'shrink'
+type RefuseReason = CatalogRefuseReason
 
 interface WriteResult {
   saved: boolean
   warning: string | null
   reason?: RefuseReason
+  /** Valid cameras in the list offered. */
+  count: number
 }
 
-function refuse(reason: RefuseReason, warning: string): WriteResult {
-  return { saved: false, warning, reason }
+function refuse(reason: RefuseReason, warning: string, count = 0): WriteResult {
+  return { saved: false, warning, reason, count }
 }
 
-async function writeCatalog(
-  store: Store,
-  input: CameraCatalog | CameraCatalogResult,
-  now: Date,
-  opts: { force?: boolean; stations?: Station[] } = {},
-): Promise<WriteResult> {
+interface WriteOptions {
+  stations?: Station[]
+  /** Status read before the write: a smaller list that kept coming back is accepted (see shrinkAccepted). */
+  shrink?: CatalogStatus
+  /** Extra status changes saved with a successful write. */
+  onSaved?: (s: CatalogStatus) => CatalogStatus
+}
+
+async function writeCatalog(store: Store, input: CameraCatalog | CameraCatalogResult, now: Date, opts: WriteOptions = {}): Promise<WriteResult> {
   const source = input?.source
   if (!isCameraSourceId(source)) return refuse('invalid', 'unknown camera source')
   const fetchedAt = validIso(input.fetchedAt)
   if (!fetchedAt) return refuse('invalid', `${source}: invalid fetchedAt`)
   // A clock-skewed relay must not pin a list as "fresh" for longer than its period.
-  if (Date.parse(fetchedAt) > now.getTime() + MAX_FUTURE_SKEW_MS) return refuse('invalid', `${source}: fetchedAt is in the future`)
+  if (Date.parse(fetchedAt) > now.getTime() + MAX_FUTURE_SKEW_MS) return refuse('invalid', `${source}: fetchedAt is in the future (check the sender's clock)`)
   const local = 'refs' in input && Array.isArray(input.refs)
   const seen = new Set<string>()
   const cameras: Camera[] = []
@@ -370,16 +406,18 @@ async function writeCatalog(
   }
   if (cameras.length === 0) return refuse('empty', `${source}: empty camera list; kept the previous list`)
 
+  const n = cameras.length
   const prev = await readIndex(store, source)
   if (prev) {
     if (!local && prev.local && hoursSince(prev.fetchedAt, now) < refreshHoursOf(source)) {
-      return refuse('local-fresh', `${source}: relayed list ignored; this server fetched its own list at ${prev.fetchedAt}`)
+      return refuse('local-fresh', `${source}: relayed list ignored; this server fetched its own list at ${prev.fetchedAt}`, n)
     }
     if (Date.parse(fetchedAt) < Date.parse(prev.fetchedAt)) {
-      return refuse('older', `${source}: list from ${fetchedAt} is older than the stored one`)
+      return refuse('older', `${source}: list from ${fetchedAt} is older than the stored one`, n)
     }
-    if (!opts.force && prev.count > 0 && cameras.length < prev.count * MIN_KEEP_RATIO) {
-      return refuse('shrink', `${source}: only ${cameras.length} of ${prev.count} cameras (< 50%); kept the previous list`)
+    const accepted = opts.shrink ? shrinkAccepted(opts.shrink, n, fetchedAt, now) : false
+    if (!accepted && prev.count > 0 && n < prev.count * MIN_KEEP_RATIO) {
+      return refuse('shrink', `${source}: only ${n} of ${prev.count} cameras (< 50%); kept the previous list until the smaller list repeats for ${SHRINK_ACCEPT_AFTER_H} h`, n)
     }
   }
 
@@ -407,8 +445,19 @@ async function writeCatalog(
     local,
   }
   await store.setMeta(INDEX_META_PREFIX + source, JSON.stringify(index))
-  await updateStatus(store, source, (s) => ({ ...s, lastSuccessAt: joinedAt, lastError: null, failures: 0, shrink: null }))
-  return { saved: true, warning: null }
+  const onSaved = opts.onSaved ?? ((s: CatalogStatus) => s)
+  await updateStatus(store, source, (s) => onSaved({ ...s, lastSuccessAt: joinedAt, lastError: null, failures: 0, shrink: null }))
+  return { saved: true, warning: null, count: joined.length }
+}
+
+/** Refusals that mean "the sender has a problem" and so show in /api/health. */
+const REPORTED_REFUSALS: ReadonlySet<RefuseReason> = new Set(['invalid', 'empty', 'shrink'])
+
+export interface SaveCatalogResult {
+  saved: boolean
+  warning: string | null
+  /** Set when the list was refused. */
+  reason?: CatalogRefuseReason
 }
 
 /**
@@ -416,15 +465,30 @@ async function writeCatalog(
  * absent (relayed) ⇒ any refs are dropped and the source becomes link-only here. Refused:
  * an empty list, a list older than the stored one, a relayed list while this host's own list is
  * still fresh, and a list with fewer than half the previous cameras (partial responses must never
- * wipe the catalogue; the first save is always accepted). Stations are joined at save time.
+ * wipe the catalogue; the first save is always accepted). A smaller list is still accepted once
+ * it has come back ≥ 3 times (distinct fetches) over ≥ 24 h, as for a local refresh. Refusals
+ * that point at a problem (invalid, empty, shrink) are kept as lastError, so /api/health shows
+ * them; this host's own retry backoff is never touched. Stations are joined at save time.
  */
 export async function saveCameraCatalog(
   store: Store,
   catalog: CameraCatalog | CameraCatalogResult,
   now: Date = new Date(),
-): Promise<{ saved: boolean; warning: string | null }> {
-  const { saved, warning } = await writeCatalog(store, catalog, now)
-  return { saved, warning }
+): Promise<SaveCatalogResult> {
+  const source = catalog?.source
+  const status = isCameraSourceId(source) ? await readStatus(store, source) : undefined
+  const written = await writeCatalog(store, catalog, now, { shrink: status })
+  if (written.saved) return { saved: true, warning: null }
+  if (isCameraSourceId(source) && written.reason && REPORTED_REFUSALS.has(written.reason)) {
+    const relayed = !('refs' in catalog && Array.isArray(catalog.refs))
+    const fetchedAt = validIso(catalog.fetchedAt)
+    await updateStatus(store, source, (s) => ({
+      ...s,
+      lastError: `${relayed ? 'relay: ' : ''}${redactSecrets(written.warning ?? 'list refused')}`,
+      shrink: written.reason === 'shrink' && fetchedAt ? nextShrink(s, written.count, fetchedAt, now) : s.shrink,
+    }))
+  }
+  return { saved: false, warning: written.warning, ...(written.reason ? { reason: written.reason } : {}) }
 }
 
 /** Record a refresh failure reported by a relay (does not change this host's own retry backoff). */
@@ -468,18 +532,21 @@ export function failureBackoffHours(failures: number, refreshHours: number): num
 }
 
 /**
- * Is a refresh due? Missing or older than refreshHours (with failure backoff); daily lists also
- * refresh at their preferred Bangkok hour once half a period old. A list relayed from elsewhere
- * is refetched locally once per period when the upstream is not Thai-IP-only (this host may
- * then serve its images).
+ * Is a refresh due? Missing or older than refreshHours (with failure backoff). Daily lists also
+ * refresh in their preferred Bangkok hour once at least an hour old, so whenever a list was
+ * first fetched, the schedule moves to that hour at the next window (one extra fetch that day).
+ * A list relayed from elsewhere is refetched locally once per period when the upstream is not
+ * Thai-IP-only (this host may then serve its images); a relayed Thai-IP-only list is left to the
+ * Thai machine that sends it.
  */
 export function catalogDue(p: DueInput): boolean {
   const age = hoursSince(p.fetchedAt, p.now)
   const sinceAttempt = hoursSince(p.lastAttemptAt, p.now)
   if (sinceAttempt < failureBackoffHours(p.failures, p.refreshHours)) return false
+  if (!p.local && p.thaiIpOnly && p.fetchedAt !== null) return false
   if (age >= p.refreshHours) return true
   const preferred = PREFERRED_HOUR_BKK[p.source]
-  if (preferred !== undefined && age >= p.refreshHours / 2 && sinceAttempt >= 1 && (p.now.getUTCHours() + 7) % 24 === preferred) return true
+  if (preferred !== undefined && age >= DRIFT_MIN_AGE_H && sinceAttempt >= 1 && (p.now.getUTCHours() + 7) % 24 === preferred) return true
   if (!p.local && !p.thaiIpOnly) return sinceAttempt >= p.refreshHours
   return false
 }
@@ -498,16 +565,54 @@ function describeError(err: unknown, thaiIpOnly: boolean): string {
   return text
 }
 
-/** Accept a smaller list after it came back consistently (±10%) for a day. */
-function shrinkAccepted(status: CatalogStatus, count: number, now: Date): boolean {
+/** Accept a smaller list after it came back consistently (±10%, distinct fetches) for a day. */
+function shrinkAccepted(status: CatalogStatus, count: number, fetchedAt: string, now: Date): boolean {
   const s = status.shrink
-  return !!s && Math.abs(count - s.count) <= s.count * 0.1 && s.seen + 1 >= SHRINK_ACCEPT_SEEN && hoursSince(s.firstSeenAt, now) >= SHRINK_ACCEPT_AFTER_H
+  if (!s || Math.abs(count - s.count) > s.count * 0.1) return false
+  const seen = s.lastFetchedAt === fetchedAt ? s.seen : s.seen + 1
+  return seen >= SHRINK_ACCEPT_SEEN && hoursSince(s.firstSeenAt, now) >= SHRINK_ACCEPT_AFTER_H
 }
 
-function nextShrink(status: CatalogStatus, count: number, now: Date): ShrinkTrack {
+function nextShrink(status: CatalogStatus, count: number, fetchedAt: string, now: Date): ShrinkTrack {
   const s = status.shrink
-  if (s && Math.abs(count - s.count) <= s.count * 0.1) return { ...s, seen: s.seen + 1 }
-  return { count, firstSeenAt: now.toISOString(), seen: 1 }
+  if (s && Math.abs(count - s.count) <= s.count * 0.1) {
+    return s.lastFetchedAt === fetchedAt ? s : { ...s, seen: s.seen + 1, lastFetchedAt: fetchedAt }
+  }
+  return { count, firstSeenAt: now.toISOString(), seen: 1, lastFetchedAt: fetchedAt }
+}
+
+/** The OS hostname, cleaned (status keys); 'host' when unavailable. */
+function defaultHostId(): string {
+  try {
+    return hostname()
+  } catch {
+    return 'host'
+  }
+}
+
+function hostKey(hostId: string): string {
+  return `h:${hostId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || 'host'}`
+}
+
+/** This host's attempts: its own entry for Thai-IP-only sources (host set), else the shared ones. */
+function attemptOf(s: CatalogStatus, host: string | null): HostAttempt {
+  if (host === null) return { lastAttemptAt: s.lastAttemptAt, failures: s.failures }
+  const h = s.hosts && Object.hasOwn(s.hosts, host) ? s.hosts[host] : undefined
+  return {
+    lastAttemptAt: typeof h?.lastAttemptAt === 'string' ? h.lastAttemptAt : null,
+    failures: typeof h?.failures === 'number' && Number.isInteger(h.failures) && h.failures > 0 ? h.failures : 0,
+  }
+}
+
+/** Record an attempt (shared fields always; the host's own entry too when set). */
+function withAttempt(s: CatalogStatus, host: string | null, a: HostAttempt): CatalogStatus {
+  const next: CatalogStatus = { ...s, lastAttemptAt: a.lastAttemptAt, failures: a.failures }
+  if (host === null) return next
+  const time = (x: HostAttempt) => (x.lastAttemptAt ? Date.parse(x.lastAttemptAt) || 0 : 0)
+  const hosts = Object.entries({ ...(s.hosts ?? {}), [host]: a })
+    .sort(([, x], [, y]) => time(y) - time(x))
+    .slice(0, MAX_TRACKED_HOSTS)
+  return { ...next, hosts: Object.fromEntries(hosts) }
 }
 
 async function refreshOne(
@@ -517,13 +622,18 @@ async function refreshOne(
   signal: AbortSignal,
   stations: () => Promise<Station[]>,
   force: boolean,
+  hostId: string,
+  deadlineMs: number,
 ): Promise<CameraCatalogReport> {
   const { store } = deps
   const source = adapter.id
+  // Thai-IP-only lists: attempts and backoff are kept per host (see CatalogStatus.hosts).
+  const host = adapter.thaiIpOnly ? hostKey(hostId) : null
   let count = 0
   try {
     const [index, status] = await Promise.all([readIndex(store, source), readStatus(store, source)])
     count = index?.count ?? 0
+    const mine = attemptOf(status, host)
     const due =
       force ||
       catalogDue({
@@ -532,8 +642,8 @@ async function refreshOne(
         thaiIpOnly: adapter.thaiIpOnly,
         fetchedAt: index?.fetchedAt ?? null,
         local: index?.local ?? false,
-        lastAttemptAt: status.lastAttemptAt,
-        failures: status.failures,
+        lastAttemptAt: mine.lastAttemptAt,
+        failures: mine.failures,
         now,
       })
     if (!due) {
@@ -547,33 +657,62 @@ async function refreshOne(
     }
     if (signal.aborted) return { source, ok: false, count, skipped: true, error: 'aborted' }
 
-    await updateStatus(store, source, (s) => ({ ...s, lastAttemptAt: now.toISOString() }))
+    const attemptedAt = now.toISOString()
     let result: CameraCatalogResult
     try {
-      result = await adapter.fetchCatalog({ fetch: deps.fetch, now, timeoutMs: deps.config.FETCH_TIMEOUT_MS, signal, sleep: deps.sleep })
+      // The list in use: DWR keeps a station's last known position when its lookup fails.
+      const previous = index ? ((await loadEntry(store, source).catch(() => null))?.catalog ?? null) : null
+      result = await adapter.fetchCatalog({ fetch: deps.fetch, now, timeoutMs: deps.config.FETCH_TIMEOUT_MS, signal, sleep: deps.sleep, previous })
     } catch (err) {
-      const error = describeError(err, adapter.thaiIpOnly)
-      await updateStatus(store, source, (s) => ({ ...s, lastError: error, failures: s.failures + 1 }))
+      if (deps.signal?.aborted) {
+        // Stopped by the caller (shutdown or its own deadline), not by the upstream: nothing is
+        // recorded (no backoff, no health error), so the next run refreshes straight away.
+        deps.log?.(`[cctv] ${source}: refresh interrupted; retried on the next run`)
+        return { source, ok: false, count, skipped: true, error: 'aborted' }
+      }
+      // Our own whole-refresh deadline is not a network symptom: no "Thai IP only" note.
+      const error = signal.aborted ? `refresh took longer than ${deadlineMs / 1000} s` : describeError(err, adapter.thaiIpOnly)
+      await updateStatus(store, source, (s) =>
+        withAttempt({ ...s, lastError: error }, host, { lastAttemptAt: attemptedAt, failures: attemptOf(s, host).failures + 1 }),
+      )
       deps.log?.(`[cctv] ${source} FAILED: ${error}`)
       return { source, ok: false, count, error }
     }
     const warnings = result.warnings.map(redactSecrets)
-    const written = await writeCatalog(store, result, now, {
-      force: shrinkAccepted(status, result.cameras.length, now),
-      stations: await stations(),
-    })
+    let written: WriteResult
+    try {
+      written = await writeCatalog(store, result, now, {
+        shrink: status,
+        stations: await stations(),
+        onSaved: (s) => withAttempt(s, host, { lastAttemptAt: attemptedAt, failures: 0 }),
+      })
+    } catch (err) {
+      // Could not store it: back off like a failed fetch rather than refetch every cycle.
+      const error = `store failed: ${describeError(err, false)}`
+      await updateStatus(store, source, (s) =>
+        withAttempt({ ...s, lastError: error }, host, { lastAttemptAt: attemptedAt, failures: attemptOf(s, host).failures + 1 }),
+      ).catch(() => undefined)
+      deps.log?.(`[cctv] ${source}: ${error}`)
+      return { source, ok: false, count, error, warnings }
+    }
     if (written.saved) {
       const sites = new Set(result.cameras.map((c) => c.siteId)).size
       deps.log?.(`[cctv] ${source}: ${result.cameras.length} camera(s) at ${sites} site(s)${warnings.length ? ` (${warnings.join('; ')})` : ''}`)
       return { source, ok: true, count: result.cameras.length, warnings }
     }
     const error = written.warning ?? 'not saved'
-    await updateStatus(store, source, (s) => ({
-      ...s,
-      lastError: error,
-      failures: s.failures + 1,
-      shrink: written.reason === 'shrink' ? nextShrink(s, result.cameras.length, now) : s.shrink,
-    }))
+    const fetchedAt = validIso(result.fetchedAt)
+    await updateStatus(store, source, (s) =>
+      withAttempt(
+        {
+          ...s,
+          lastError: error,
+          shrink: written.reason === 'shrink' && fetchedAt ? nextShrink(s, written.count, fetchedAt, now) : s.shrink,
+        },
+        host,
+        { lastAttemptAt: attemptedAt, failures: attemptOf(s, host).failures + 1 },
+      ),
+    )
     deps.log?.(`[cctv] ${source}: ${error}`)
     return { source, ok: false, count, error, warnings }
   } catch (err) {
@@ -586,8 +725,9 @@ async function refreshOne(
 const inflight = new WeakMap<Store, Promise<CameraCatalogReport[]>>()
 
 /**
- * Refresh the enabled catalogues that are due (or all with `force`). Never throws; a failed
- * refresh keeps the last good list. Concurrent calls for one store share a single run.
+ * Refresh the enabled catalogues that are due (or all with `force`); with `skipThaiIpOnly`, only
+ * those reachable from anywhere. Never throws; a failed refresh keeps the last good list.
+ * Concurrent calls for one store share a single run.
  */
 export async function refreshCameraCatalogs(deps: CameraCatalogDeps, opts: { force?: boolean } = {}): Promise<CameraCatalogReport[]> {
   const running = inflight.get(deps.store)
@@ -600,15 +740,18 @@ export async function refreshCameraCatalogs(deps: CameraCatalogDeps, opts: { for
 
 async function refreshAll(deps: CameraCatalogDeps, force: boolean): Promise<CameraCatalogReport[]> {
   try {
-    const adapters = deps.adapters ?? getCameraSources(deps.config)
+    const configured = deps.adapters ?? getCameraSources(deps.config)
+    const adapters = deps.skipThaiIpOnly ? configured.filter((a) => !a.thaiIpOnly) : configured
     if (adapters.length === 0) return []
     const now = deps.now?.() ?? new Date()
-    const deadline = AbortSignal.timeout(CATALOG_REFRESH_DEADLINE_MS)
+    const deadlineMs = deps.deadlineMs ?? CATALOG_REFRESH_DEADLINE_MS
+    const deadline = AbortSignal.timeout(deadlineMs)
     const signal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline
     let stationsP: Promise<Station[]> | null = null
     const stations = () => (stationsP ??= deps.store.listStations())
+    const hostId = deps.hostId ?? defaultHostId()
     // Different upstream hosts: run side by side.
-    return await Promise.all(adapters.map((a) => refreshOne(deps, a, now, signal, stations, force)))
+    return await Promise.all(adapters.map((a) => refreshOne(deps, a, now, signal, stations, force, hostId, deadlineMs)))
   } catch (err) {
     deps.log?.(`[cctv] refresh error: ${describeError(err, false)}`)
     return []

@@ -1,6 +1,7 @@
 import { getConfig } from '../config'
 import { logChannelConfigWarnings } from '../notify'
 import { backgroundTasksSettled, runningBackgroundTasks } from './background'
+import { logCctvConfigWarnings } from './cctv-proxy'
 import { startEmbeddedWorker, stopEmbeddedWorker } from './embedded-worker'
 import { log as defaultLog, type Logger } from './log'
 
@@ -127,7 +128,9 @@ export function __resetShutdownForTests(): void {
 export function onServerStart(env: Record<string, string | undefined> = process.env, opts: ShutdownOptions = {}): void {
   const log = opts.log ?? defaultLog
   try {
-    logChannelConfigWarnings(getConfig(), log)
+    const config = getConfig()
+    logChannelConfigWarnings(config, log)
+    logCctvConfigWarnings(config, log)
   } catch (err) {
     log(`[config] invalid configuration: ${err instanceof Error ? err.message : String(err)}`)
   }

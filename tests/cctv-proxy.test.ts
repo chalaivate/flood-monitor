@@ -1,8 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  BACKOFF_BASE_MS,
+  BACKOFF_MAX_MS,
   BMA_FLOODCAM_PROXY,
   CCTV_POLICY,
+  CCTV_SERVER_MAX_MS,
+  CCTV_SWEEP_MS,
+  CLIENT_MAX_MISSES,
+  CLIENT_MAX_WAITING,
+  HASH_MAX_AGE_MS,
+  SOURCE_DOWN_AFTER,
+  SOURCE_DOWN_MS,
+  __resetCctvWarningsForTests,
+  cctvConfigWarnings,
+  CCTV_MSG,
+  canServeImages,
   cctvFailure,
+  cctvImageAvailability,
   cctvFrameResponse,
   cctvImagePath,
   cctvImageStats,
@@ -11,12 +25,18 @@ import {
   getCctvImage,
   isJpeg,
   jpegSize,
+  logCctvConfigWarnings,
   parseCctvImageFile,
+  parseRetryAfterMs,
+  startCctvSweeper,
+  sweepCctvMemory,
   trimJpeg,
   validateJpeg,
   type CctvFetchDeps,
+  type CctvImageOutcome,
 } from '@/lib/server/cctv-proxy'
 import { ImageCache, NotAttemptedError } from '@/lib/server/image-cache'
+import { LIMITS, RateLimiter } from '@/lib/server/rate-limit'
 
 // Image proxy internals with an injected fetch and clock; nothing reaches the network.
 // Frames are synthetic byte strings shaped like JPEGs (no real camera picture is used).
@@ -342,6 +362,18 @@ describe('image responses', () => {
     expect(cctvFailure('no-image')).toMatchObject({ status: 502, message: 'หน่วยงานยังไม่มีภาพจากกล้องนี้' })
     expect(cctvFailure('budget')).toMatchObject({ status: 503, message: 'ระบบพักการดึงภาพชั่วคราว' })
     expect(cctvFailure('busy').headers['Retry-After']).toBe('30')
+    // This client's own limits: 429, never cached by shared caches.
+    expect(cctvFailure('limited', 42)).toEqual({ status: 429, message: CCTV_MSG.limited, headers: { 'Retry-After': '42', 'Cache-Control': 'no-store' } })
+    // This server cannot fetch the source right now: link out.
+    expect(cctvFailure('unavailable', 1800)).toEqual({ status: 503, message: CCTV_MSG.unavailable, headers: { 'Retry-After': '1800' } })
+    expect([CCTV_MSG.limited, CCTV_MSG.unavailable].every((m) => /[฀-๿]/.test(m))).toBe(true)
+  })
+
+  it('parses Retry-After in seconds or as an HTTP date', () => {
+    expect(parseRetryAfterMs('120', t)).toBe(120_000)
+    expect(parseRetryAfterMs(new Date(t + 90_000).toUTCString(), t)).toBe(90_000)
+    expect(parseRetryAfterMs('soon', t)).toBeNull()
+    expect(parseRetryAfterMs(null, t)).toBeNull()
   })
 })
 
@@ -374,6 +406,32 @@ describe('ImageCache', () => {
     const load = vi.fn(async () => ({ fetchedAt: clock }))
     expect((await cache.get('b', policy, load, () => clock)).ok).toBe(true)
     expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('prune() drops values at their stale limit without any request (with an optional look-ahead)', async () => {
+    const cache = new ImageCache<{ fetchedAt: number }>(10)
+    await cache.get('a', policy, async () => ({ fetchedAt: 0 }), () => 0)
+    cache.prune(4_000)
+    expect(cache.has('a')).toBe(true)
+    cache.prune(4_000, 1_000) // a sweep every second: 'a' would pass 5 s before the next one
+    expect(cache.has('a')).toBe(false)
+  })
+
+  it('peek() tells whether a request would go upstream, without loading', async () => {
+    let clock = 0
+    const cache = new ImageCache<{ fetchedAt: number }>(10)
+    expect(cache.peek('a', policy, clock)).toEqual({ wouldLoad: true, value: null })
+    await cache.get('a', policy, async () => ({ fetchedAt: clock }), () => clock)
+    expect(cache.peek('a', policy, clock)).toEqual({ wouldLoad: false, value: { fetchedAt: 0 } })
+    clock = 2_000 // past the TTL, within the stale limit
+    expect(cache.peek('a', policy, clock)).toEqual({ wouldLoad: true, value: { fetchedAt: 0 } })
+    await cache.get('a', policy, async () => Promise.reject(new Error('down')), () => clock)
+    expect(cache.peek('a', policy, clock).wouldLoad).toBe(false) // failure remembered
+    let release!: () => void
+    const pending = cache.get('b', policy, () => new Promise((r) => (release = () => r({ fetchedAt: clock }))), () => clock)
+    expect(cache.peek('b', policy, clock).wouldLoad).toBe(false) // joins the running fetch
+    release()
+    await pending
   })
 })
 
@@ -419,5 +477,387 @@ describe('host-level reachability', () => {
     }
     expect(await canServeImages(await cfg(), store, 'bma-floodcam', t)).toBe(true)
     store.close()
+  })
+
+  const ok = () => new Response(jpeg())
+  const ids = (n: number, from: number) => Array.from({ length: n }, (_, i) => `bma-floodcam:${from + i}`)
+  const get = (id: string, f: typeof fetch, extra: Partial<CctvFetchDeps> = {}) =>
+    getCctvImage('bma-floodcam', id, `rtsp://example.invalid/cam/${id.split(':')[1]}`, deps(f, extra))
+  const quiet = () => {
+    const lines: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((m: unknown) => void lines.push(String(m)))
+    return { lines, restore: () => spy.mockRestore() }
+  }
+
+  it('does not switch a fresh host off for camera-level failures (HTTP 5xx/404, placeholders, timeouts)', async () => {
+    const store = await storeWithRefs()
+    const config = await cfg()
+    const png = new Uint8Array(89)
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const cameraLevel: ((url: string, init: RequestInit) => Response | Promise<Response>)[] = [
+      () => new Response('camera offline', { status: 500 }),
+      () => new Response('', { status: 404 }),
+      () => new Response(png),
+      (_u, init) => new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason))),
+    ]
+    for (const respond of cameraLevel) {
+      clearCctvCache()
+      const { fetch, calls } = fakeFetch(respond)
+      for (const id of ids(SOURCE_DOWN_AFTER + 2, 300)) expect((await get(id, fetch, { policy: { timeoutMs: 20 } })).ok).toBe(false)
+      expect(calls).toHaveLength(SOURCE_DOWN_AFTER + 2)
+      expect(await canServeImages(config, store, 'bma-floodcam', t)).toBe(true)
+    }
+    // A malformed reference is never sent and says nothing about the host either.
+    clearCctvCache()
+    const none = fakeFetch(ok)
+    for (let i = 0; i < SOURCE_DOWN_AFTER; i++) await getCctvImage('bma-floodcam', `bma-floodcam:${400 + i}`, 'javascript:x', deps(none.fetch))
+    expect(await canServeImages(config, store, 'bma-floodcam', t)).toBe(true)
+
+    // Being turned away does count: network errors, HTML / challenge pages.
+    const log = quiet()
+    try {
+      for (const respond of [
+        () => Promise.reject(new TypeError('fetch failed')),
+        () => new Response('<!DOCTYPE html><title>Just a moment...</title>', { headers: { 'content-type': 'text/html' } }),
+      ]) {
+        clearCctvCache()
+        const { fetch } = fakeFetch(respond)
+        for (const id of ids(SOURCE_DOWN_AFTER, 300)) await get(id, fetch)
+        expect(await cctvImageAvailability(config, store, 'bma-floodcam', t)).toEqual({ images: false, reason: 'host-unreachable', until: t + SOURCE_DOWN_MS })
+      }
+    } finally {
+      log.restore()
+    }
+    store.close()
+  })
+
+  it('counts an oversize challenge page on the DWR snapshot step as being turned away', async () => {
+    const store = await storeWithRefs()
+    const page = `<!DOCTYPE html><html><body>${'x'.repeat(20_000)}</body></html>`
+    const { fetch, calls } = fakeFetch(() => new Response(page, { headers: { 'content-type': 'text/html' } }))
+    const log = quiet()
+    try {
+      for (let i = 0; i < SOURCE_DOWN_AFTER; i++) expect(await getCctvImage('dwr-cctv', `dwr-cctv:S${i}`, `S${i}`, deps(fetch))).toMatchObject({ ok: false })
+    } finally {
+      log.restore()
+    }
+    expect(calls).toHaveLength(SOURCE_DOWN_AFTER) // never reached the image step
+    expect(await cctvImageAvailability(await cfg(), store, 'dwr-cctv', t)).toMatchObject({ images: false, reason: 'host-unreachable' })
+    store.close()
+  })
+
+  it('once a fresh host gives up, queued requests never go upstream and it is logged once', async () => {
+    const store = await storeWithRefs()
+    const log = quiet()
+    try {
+      let failAll!: (e: Error) => void
+      const failing = new Promise<Response>((_, reject) => (failAll = reject))
+      failing.catch(() => undefined)
+      const { fetch, calls } = fakeFetch(() => failing)
+      const pending = ids(12, 500).map((id) => get(id, fetch)) // 3 in flight, 9 queued
+      await new Promise((r) => setTimeout(r, 5))
+      expect(calls).toHaveLength(CCTV_POLICY['bma-floodcam'].maxInFlight)
+      failAll(new TypeError('fetch failed'))
+      const results = await Promise.all(pending)
+      expect(calls).toHaveLength(3)
+      expect(results.every((r) => !r.ok)).toBe(true)
+      expect(results.filter((r) => !r.ok && r.failure === 'unavailable').length).toBeGreaterThanOrEqual(9)
+      expect(log.lines.filter((l) => l.includes('images unreachable from this server'))).toHaveLength(1)
+      // Later requests are answered at once, with how long it lasts.
+      expect(await get('bma-floodcam:900', fetch)).toEqual({ ok: false, failure: 'unavailable', retryAfterSec: SOURCE_DOWN_MS / 1000 })
+      expect(calls).toHaveLength(3)
+    } finally {
+      log.restore()
+    }
+    store.close()
+  })
+
+  it('pauses the whole source on HTTP 429, honouring Retry-After (capped at 1 h), even on a host that had frames', async () => {
+    const store = await storeWithRefs()
+    const config = await cfg()
+    const log = quiet()
+    try {
+      let answer: () => Response = ok
+      const { fetch, calls } = fakeFetch(() => answer())
+      expect((await get('bma-floodcam:1', fetch)).ok).toBe(true)
+      answer = () => new Response('slow down', { status: 429, headers: { 'Retry-After': '3600' } })
+      expect(await get('bma-floodcam:2', fetch)).toEqual({ ok: false, failure: 'unavailable', retryAfterSec: 3600 })
+      expect(await cctvImageAvailability(config, store, 'bma-floodcam', t)).toEqual({ images: false, reason: 'agency-backoff', until: t + 3600_000 })
+      // The frame it already had is still served while young enough.
+      t += 61_000
+      expect(await get('bma-floodcam:1', fetch)).toMatchObject({ ok: true, stale: true })
+      // 20 cameras once a minute: none of it reaches the agency.
+      for (let i = 0; i < 20; i++) {
+        t += 60_000
+        expect(await get(`bma-floodcam:${100 + i}`, fetch)).toMatchObject({ ok: false, failure: 'unavailable' })
+      }
+      expect(calls).toHaveLength(2)
+      expect(log.lines.filter((l) => l.includes('refusing image requests'))).toHaveLength(1)
+      t += 40 * 60_000 // the hour is over
+      answer = ok
+      expect((await get('bma-floodcam:200', fetch)).ok).toBe(true)
+      expect(calls).toHaveLength(3)
+      // An absurd Retry-After is capped at an hour.
+      answer = () => new Response('', { status: 429, headers: { 'Retry-After': '999999' } })
+      await get('bma-floodcam:201', fetch)
+      expect((await cctvImageAvailability(config, store, 'bma-floodcam', t)).until).toBe(t + BACKOFF_MAX_MS)
+    } finally {
+      log.restore()
+    }
+    store.close()
+  })
+
+  it('backs off after three 403s in a row on a host that had frames (a single one is sporadic), and on 503 with Retry-After', async () => {
+    const store = await storeWithRefs()
+    const config = await cfg()
+    const log = quiet()
+    try {
+      let answer: () => Response = ok
+      const { fetch } = fakeFetch(() => answer())
+      expect((await get('bma-floodcam:1', fetch)).ok).toBe(true)
+      answer = () => new Response('forbidden', { status: 403 })
+      expect(await get('bma-floodcam:2', fetch)).toEqual({ ok: false, failure: 'unreachable' })
+      answer = ok
+      expect((await get('bma-floodcam:3', fetch)).ok).toBe(true) // the streak is broken
+      answer = () => new Response('forbidden', { status: 403 })
+      expect(await get('bma-floodcam:4', fetch)).toEqual({ ok: false, failure: 'unreachable' })
+      expect(await get('bma-floodcam:5', fetch)).toEqual({ ok: false, failure: 'unreachable' })
+      expect(await canServeImages(config, store, 'bma-floodcam', t)).toBe(true)
+      expect(await get('bma-floodcam:6', fetch)).toMatchObject({ ok: false, failure: 'unavailable' })
+      expect(await cctvImageAvailability(config, store, 'bma-floodcam', t)).toEqual({ images: false, reason: 'agency-backoff', until: t + BACKOFF_BASE_MS })
+
+      clearCctvCache()
+      answer = () => new Response('', { status: 503 })
+      await get('bma-floodcam:7', fetch)
+      expect(await canServeImages(config, store, 'bma-floodcam', t)).toBe(true) // no Retry-After: a camera error
+      answer = () => new Response('', { status: 503, headers: { 'Retry-After': '120' } })
+      await get('bma-floodcam:8', fetch)
+      expect(await cctvImageAvailability(config, store, 'bma-floodcam', t)).toEqual({ images: false, reason: 'agency-backoff', until: t + 120_000 })
+    } finally {
+      log.restore()
+    }
+    store.close()
+  })
+})
+
+describe('per-client limits (one client cannot use up the shared queue or budget)', () => {
+  const ok = () => new Response(jpeg())
+  const get = (id: string, f: typeof fetch, extra: Partial<CctvFetchDeps> = {}) =>
+    getCctvImage('bma-floodcam', id, `rtsp://example.invalid/cam/${id.split(':')[1]}`, deps(f, extra))
+  const tick = () => new Promise((r) => setTimeout(r, 5))
+  const hold = () => {
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    return { release, respond: async () => (await held, ok()) }
+  }
+
+  it('charges only cache misses to the client, serves its stale frame when it runs out, and leaves others alone', async () => {
+    const limiter = new RateLimiter(now)
+    const { fetch, calls } = fakeFetch(ok)
+    const a = { client: '198.51.100.66', limiter }
+    const n = LIMITS.cctvMiss.capacity
+    for (let i = 0; i < n; i++) expect((await get(`bma-floodcam:${i}`, fetch, a)).ok).toBe(true)
+    expect((await get('bma-floodcam:0', fetch, a)).ok).toBe(true) // a hit costs nothing
+    expect(calls).toHaveLength(n)
+    const limited = await get(`bma-floodcam:${n}`, fetch, a)
+    expect(limited).toMatchObject({ ok: false, failure: 'limited' })
+    expect(!limited.ok && limited.retryAfterSec).toBeGreaterThan(0)
+    expect(calls).toHaveLength(n)
+    expect((await get(`bma-floodcam:${n}`, fetch, { client: '203.0.113.9', limiter })).ok).toBe(true)
+    expect((await get(`bma-floodcam:${n + 1}`, fetch, { client: null, limiter })).ok).toBe(true) // unknown IP: per-source limits only
+
+    // Past its TTL, a client without tokens gets the last good frame rather than a 429.
+    t += 61_000
+    while (limiter.take('cctvMiss:198.51.100.66', LIMITS.cctvMiss).ok) {
+      // spend what refilled meanwhile
+    }
+    expect(await get('bma-floodcam:0', fetch, a)).toMatchObject({ ok: true, stale: true })
+    expect(calls).toHaveLength(n + 2)
+    // The bucket refills over its window.
+    t += LIMITS.cctvMiss.windowMs
+    expect((await get('bma-floodcam:0', fetch, a)).ok).toBe(true)
+    expect(calls).toHaveLength(n + 3)
+  })
+
+  it(`lets one client have at most ${CLIENT_MAX_MISSES} upstream fetches going; its other misses wait in its own line`, async () => {
+    const h = hold()
+    const { fetch, calls } = fakeFetch(h.respond)
+    const limiter = new RateLimiter(now)
+    const mine = Array.from({ length: 4 }, (_, i) => get(`bma-floodcam:${i}`, fetch, { client: 'A', limiter }))
+    await tick()
+    expect(calls).toHaveLength(CLIENT_MAX_MISSES)
+    const stats = cctvImageStats('bma-floodcam', t)
+    expect(stats.inFlight + stats.queued).toBe(CLIENT_MAX_MISSES) // the shared queue holds no more of A
+    const other = get('bma-floodcam:50', fetch, { client: 'B', limiter }) // the third slot is free for B
+    await tick()
+    expect(calls).toHaveLength(CLIENT_MAX_MISSES + 1)
+    h.release()
+    expect((await Promise.all([...mine, other])).every((r) => r.ok)).toBe(true)
+    expect(calls).toHaveLength(5)
+  })
+
+  it('answers 429 when the client line is full and lets an abandoned request leave it', async () => {
+    const h = hold()
+    const { fetch } = fakeFetch(h.respond)
+    const limiter = new RateLimiter(now)
+    const a = { client: 'A', limiter }
+    const pending = Array.from({ length: CLIENT_MAX_MISSES + CLIENT_MAX_WAITING - 1 }, (_, i) => get(`bma-floodcam:${i}`, fetch, a))
+    await tick()
+    const ctrl = new AbortController()
+    const leaving = get('bma-floodcam:70', fetch, { ...a, signal: ctrl.signal, policy: { queueWaitMs: 60_000 } })
+    await tick()
+    expect(await get('bma-floodcam:71', fetch, a)).toMatchObject({ ok: false, failure: 'limited', retryAfterSec: 15 })
+    ctrl.abort()
+    expect(await leaving).toEqual({ ok: false, failure: 'busy' }) // at once, not after 60 s
+    const next = get('bma-floodcam:71', fetch, a) // the freed place in the line
+    h.release()
+    expect((await Promise.all([...pending, next])).every((r: CctvImageOutcome) => r.ok)).toBe(true)
+  })
+
+  it('lets an abandoned request leave the source queue at once (it is not counted as refused)', async () => {
+    const h = hold()
+    const { fetch, calls } = fakeFetch(h.respond)
+    const policy = { maxInFlight: 1, maxQueue: 1, queueWaitMs: 60_000 }
+    const first = get('bma-floodcam:1', fetch, { policy })
+    await tick()
+    const ctrl = new AbortController()
+    const queued = get('bma-floodcam:2', fetch, { policy, signal: ctrl.signal })
+    await tick()
+    expect(cctvImageStats('bma-floodcam', t).queued).toBe(1)
+    expect(await get('bma-floodcam:3', fetch, { policy })).toEqual({ ok: false, failure: 'busy' }) // queue full
+    ctrl.abort()
+    expect(await queued).toEqual({ ok: false, failure: 'busy' })
+    expect(cctvImageStats('bma-floodcam', t).queued).toBe(0)
+    const again = get('bma-floodcam:3', fetch, { policy })
+    await tick()
+    expect(cctvImageStats('bma-floodcam', t).queued).toBe(1)
+    h.release()
+    expect((await first).ok && (await again).ok).toBe(true)
+    expect(calls).toHaveLength(2)
+    expect(cctvImageStats('bma-floodcam', t).frames1h.refused).toBe(1)
+  })
+
+  it('reports the remaining hourly budget only coarsely', async () => {
+    const policy = CCTV_POLICY['bma-floodcam']
+    const saved = policy.hourlyBudget
+    policy.hourlyBudget = 8
+    try {
+      const { fetch } = fakeFetch(ok)
+      for (let i = 0; i < 6; i++) await get(`bma-floodcam:${i}`, fetch)
+      expect(cctvImageStats('bma-floodcam', t).budget).toBe('ok')
+      await get('bma-floodcam:6', fetch)
+      expect(cctvImageStats('bma-floodcam', t).budget).toBe('low')
+      await get('bma-floodcam:7', fetch)
+      expect(cctvImageStats('bma-floodcam', t).budget).toBe('spent')
+    } finally {
+      policy.hourlyBudget = saved
+    }
+  })
+})
+
+describe('server deadline (below the client watchdog)', () => {
+  it('keeps queue wait + upstream deadline within CCTV_SERVER_MAX_MS (≤ 40 s) for every source', () => {
+    expect(CCTV_SERVER_MAX_MS).toBeLessThanOrEqual(40_000)
+    for (const p of Object.values(CCTV_POLICY)) expect(p.queueWaitMs + p.timeoutMs).toBeLessThanOrEqual(CCTV_SERVER_MAX_MS)
+  })
+
+  it('gives the two DWR steps one shared deadline', async () => {
+    const step = 150
+    const { fetch, calls } = fakeFetch(
+      (url, init) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(url.includes('/snapshot/') ? Response.json({ value: '/TA100220/2026/10/4/10_15.jpg' }) : new Response(jpeg())), step)
+          init.signal?.addEventListener('abort', () => {
+            clearTimeout(timer)
+            reject(init.signal?.reason)
+          })
+        }),
+    )
+    // Each step alone fits in the deadline; both together do not.
+    const res = await getCctvImage('dwr-cctv', 'dwr-cctv:A', 'TA100220', deps(fetch, { policy: { timeoutMs: 250 } }))
+    expect(res).toEqual({ ok: false, failure: 'unreachable' })
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.init.signal).toBe(calls[1]!.init.signal)
+  })
+})
+
+describe('frame retention (memory only, dropped on time)', () => {
+  type Mem = { __floodCctv: { frames: ImageCache<{ fetchedAt: number }>; hashes: Map<string, unknown> } }
+  const mem = () => (globalThis as unknown as Mem).__floodCctv
+
+  it('drops frames by their stale limit and frame hashes after 2 h on a timer, with no further requests', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], shouldClearNativeTimers: true })
+    try {
+      startCctvSweeper()
+      const { fetch } = fakeFetch(() => new Response(jpeg()))
+      expect((await getCctvImage('bma-floodcam', CAM, REF, { fetch })).ok).toBe(true)
+      expect(mem().frames.size).toBe(1)
+      const staleMax = CCTV_POLICY['bma-floodcam'].staleMaxMs
+      vi.advanceTimersByTime(staleMax - 2 * CCTV_SWEEP_MS)
+      expect(mem().frames.size).toBe(1)
+      vi.advanceTimersByTime(CCTV_SWEEP_MS) // the last sweep before the limit
+      expect(mem().frames.size).toBe(0)
+      expect(mem().hashes.size).toBe(1) // a hash is no image, but it is not kept for long either
+      vi.advanceTimersByTime(HASH_MAX_AGE_MS)
+      expect(mem().hashes.size).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      startCctvSweeper()
+    }
+  })
+
+  it('a sweep never keeps a frame past its limit until the next sweep', async () => {
+    const { fetch } = fakeFetch(() => new Response(jpeg()))
+    expect((await getCctvImage('dwr-cctv', 'dwr-cctv:B', 'TA100220', deps(fakeFetch((url) => (url.includes('/snapshot/') ? Response.json({ value: '/TA1/2026/10/4/1_1.jpg' }) : new Response(jpeg()))).fetch))).ok).toBe(true)
+    expect((await getCctvImage('bma-floodcam', CAM, REF, deps(fetch))).ok).toBe(true)
+    sweepCctvMemory(t + 15 * 60_000 - CCTV_SWEEP_MS + 1)
+    expect(mem().frames.has(CAM)).toBe(false)
+    expect(mem().frames.has('dwr-cctv:B')).toBe(true) // DWR frames may be kept for an hour
+    sweepCctvMemory(t + 60 * 60_000 - CCTV_SWEEP_MS + 1)
+    expect(mem().frames.size).toBe(0)
+  })
+})
+
+describe('startup warnings', () => {
+  const load = async (env: Record<string, string>) => (await import('@/lib/config')).loadConfig(env, { warn: () => undefined, cwd: '/srv/app' })
+
+  it('warns when agency stills are on without a trusted client IP or a contact address', async () => {
+    const both = cctvConfigWarnings(await load({}))
+    expect(both).toHaveLength(2)
+    expect(both[0]).toMatch(/TRUST_PROXY=none/)
+    expect(both[1]).toMatch(/CONTACT_EMAIL/)
+    expect(cctvConfigWarnings(await load({ TRUST_PROXY: 'cloudflare', CONTACT_EMAIL: 'privacy@example.org' }))).toEqual([])
+    expect(cctvConfigWarnings(await load({ TRUST_PROXY: 'xff', CONTACT_EMAIL: 'not an address' })).join('\n')).toMatch(/CONTACT_EMAIL/)
+    for (const env of [{ CCTV_IMAGES: '0' }, { CCTV_SOURCES: 'none' }, { DATA_MODE: 'fixture' }, { VERCEL: '1' }] as Record<string, string>[]) {
+      expect(cctvConfigWarnings(await load(env))).toEqual([])
+    }
+  })
+
+  it('logs them once per process, from onServerStart', async () => {
+    const keys = ['TRUST_PROXY', 'CONTACT_EMAIL', 'CCTV_IMAGES', 'CCTV_SOURCES', 'DATA_MODE', 'VERCEL'] as const
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    const { resetConfigCache } = await import('@/lib/config')
+    const { onServerStart } = await import('@/lib/server/lifecycle')
+    for (const k of keys) delete process.env[k]
+    resetConfigCache()
+    __resetCctvWarningsForTests()
+    try {
+      const logs: string[] = []
+      onServerStart({}, { log: (m) => logs.push(m) })
+      onServerStart({}, { log: (m) => logs.push(m) })
+      const cctv = logs.filter((l) => l.startsWith('[cctv] WARNING:'))
+      expect(cctv).toHaveLength(2)
+      expect(cctv.join('\n')).toMatch(/TRUST_PROXY=none[\s\S]*CONTACT_EMAIL/)
+      const again: string[] = []
+      logCctvConfigWarnings((await import('@/lib/config')).getConfig(), (m) => again.push(m))
+      expect(again).toEqual([])
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+      resetConfigCache()
+      __resetCctvWarningsForTests()
+    }
   })
 })

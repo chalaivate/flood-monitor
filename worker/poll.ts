@@ -5,7 +5,8 @@
 //   npm run worker -- --relay <baseUrl> fetch only the Thai-IP-only sources and POST them to
 //                                       <baseUrl>/api/ingest (Bearer INGEST_TOKEN); no local store.
 //                                       CCTV camera lists (CCTV_SOURCES) are pushed when due,
-//                                       public fields only (stream addresses stay here)
+//                                       after the readings in a POST of their own, public
+//                                       fields only (stream addresses stay here)
 //   (--once combines with --relay)
 //
 // Reads .env from the working directory when present (real env vars win).
@@ -96,7 +97,7 @@ async function main(): Promise<void> {
       `[relay] relaying ${sources.map((s) => s.id).join(', ')} → ${base.origin}/api/ingest every ${intervalMs / 60_000} min` +
         (cameraSources.length ? `; camera lists: ${cameraSources.map((a) => a.id).join(', ')}` : ''),
     )
-    cycle = async () => {
+    cycle = async (signal) => {
       const s = await runRelayCycle({
         baseUrl: base.toString(),
         token: config.INGEST_TOKEN!,
@@ -106,6 +107,8 @@ async function main(): Promise<void> {
         log,
         cameraSources,
         cameraState,
+        // Shutdown stops a camera list fetch (not counted as a failure); readings still go out.
+        signal,
       })
       if (cameraSources.length) {
         try {

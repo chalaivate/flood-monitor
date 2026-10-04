@@ -11,6 +11,7 @@ import { RAINVIEWER_ATTRIBUTION, RAINVIEWER_MAX_NATIVE_ZOOM } from '@/lib/ui/rai
 import { LEVEL_ORDER } from '@/lib/types'
 import { CameraPopup } from './CameraPopup'
 import { BaseTiles, SizeFix, cameraIcon, homeMarkerIcon, levelIcon } from './leaflet-bits'
+import { managePopupFocus, type PopupLike } from './popup-focus'
 import { StationPopup } from './StationPopup'
 
 /** Pixels of the map covered by page UI (the filter panel / bottom sheet, map controls). */
@@ -47,7 +48,10 @@ const NO_SENSORS: ReadonlyMap<string, SensorInfo> = new Map()
 
 const DEFAULT_INSETS: MapInsets = { top: 80, right: 16, bottom: 16, left: 16 }
 
-/** Keeps the attribution visible and makes every popup pan clear of the overlaid UI. */
+/**
+ * Keeps the attribution visible, makes every popup pan clear of the overlaid UI, and makes
+ * popups usable from the keyboard (focus in on open, Escape back to the marker; popup-focus.ts).
+ */
 function MapChrome({ attributionPosition, insets }: { attributionPosition: L.ControlPosition; insets: MapInsets }) {
   const map = useMap()
   const insetsRef = useRef(insets)
@@ -64,6 +68,8 @@ function MapChrome({ attributionPosition, insets }: { attributionPosition: L.Con
       const i = insetsRef.current
       e.popup.options.autoPanPaddingTopLeft = [i.left, i.top]
       e.popup.options.autoPanPaddingBottomRight = [i.right, i.bottom]
+      const popup = e.popup
+      managePopupFocus(popup as unknown as PopupLike, map.getContainer(), () => map.closePopup(popup))
     }
     map.on('popupopen', onOpen)
     return () => {

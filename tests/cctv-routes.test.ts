@@ -2,9 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { resetConfigCache } from '@/lib/config'
 import { saveCameraCatalog } from '@/lib/cameras/catalog'
 import { renderDemoCameraSvg, DEMO_WATERMARK } from '@/lib/server/cctv-demo-image'
-import { CCTV_POLICY, clearCctvCache } from '@/lib/server/cctv-proxy'
+import { CCTV_MSG, CCTV_POLICY, cctvImageStats, clearCctvCache, SOURCE_DOWN_MS } from '@/lib/server/cctv-proxy'
 import type { CamerasResponse } from '@/lib/server/public'
-import { rateLimiter } from '@/lib/server/rate-limit'
+import { LIMITS, rateLimiter } from '@/lib/server/rate-limit'
 import { demoCameraCatalog } from '@/lib/sources/cameras/demo'
 import { demoCanal, demoRoadFlood } from '@/lib/sources/demo'
 import { __setStoreForTests } from '@/lib/store'
@@ -292,7 +292,7 @@ describe('GET /api/cctv/image', () => {
     ])
   })
 
-  it('answers 404 without any upstream request for unknown, malformed, disabled or link-only cameras', async () => {
+  it('answers 404 without any upstream request for unknown, malformed or disabled sources and cameras', async () => {
     await seedLive()
     const notFound = await image('bma-floodcam', '999.jpg')
     expect(notFound.status).toBe(404)
@@ -307,13 +307,28 @@ describe('GET /api/cctv/image', () => {
       expect((await image(source, file)).status).toBe(404)
     }
     await withEnv({ CCTV_SOURCES: 'dwr-cctv' }, async () => expect((await image('bma-floodcam', '101.jpg')).status).toBe(404))
-    await withEnv({ CCTV_IMAGES: '0' }, async () => expect((await image('bma-floodcam', '101.jpg')).status).toBe(404))
+    expect(outbound).toHaveLength(0)
+  })
+
+  it('answers 503 unavailable (link out) for listed cameras whose stills are off on this server', async () => {
+    await seedLive()
+    await withEnv({ CCTV_IMAGES: '0' }, async () => {
+      const off = await image('bma-floodcam', '101.jpg')
+      expect(off.status).toBe(503)
+      expect(Number(off.headers.get('retry-after'))).toBeGreaterThan(0)
+      expect(await off.json()).toEqual({ error: CCTV_MSG.unavailable, reason: 'unavailable' })
+      // An unknown camera is still a plain 404.
+      expect((await image('bma-floodcam', '999.jpg')).status).toBe(404)
+    })
     expect(outbound).toHaveLength(0)
 
+    // A relayed catalogue (no image references on this host) is link-only.
     store = new SqliteStore(':memory:')
     __setStoreForTests(store)
     await seedLive({ refs: false })
-    expect((await image('bma-floodcam', '101.jpg')).status).toBe(404)
+    const linkOnly = await image('bma-floodcam', '101.jpg')
+    expect(linkOnly.status).toBe(503)
+    expect(((await linkOnly.json()) as { reason: string }).reason).toBe('unavailable')
     expect(outbound).toHaveLength(0)
   })
 
@@ -324,7 +339,9 @@ describe('GET /api/cctv/image', () => {
     expect(limited.status).toBe(429)
     expect(limited.headers.get('retry-after')).toBeTruthy()
     expect(limited.headers.get('cache-control')).toBe('no-store')
-    expect(((await limited.json()) as { error: string }).error).toMatch(/[฀-๿]/)
+    const body = (await limited.json()) as { error: string; reason: string }
+    expect(body.error).toMatch(/[฀-๿]/)
+    expect(body.reason).toBe('limited')
     expect((await image('bma-floodcam', '101.jpg', '198.51.100.4')).status).toBe(200)
     expect(outbound).toHaveLength(1)
   })
@@ -350,6 +367,128 @@ describe('GET /api/cctv/image', () => {
       policy.hourlyBudget = budget
     }
     expect(outbound).toHaveLength(1)
+  })
+})
+
+// --- per-client limits, source fallbacks and abandoned requests -----------------------------------
+
+/** `n` extra BMA cameras (with refs) next to the seeded ones, ids 1000… */
+async function seedMany(n: number) {
+  const cams = [...BMA_CAMS, ...Array.from({ length: n }, (_, i) => cam('bma-floodcam', String(1000 + i), 13.7 + i * 0.001, 100.5))]
+  const refs = cams.map((c) => ({ cameraId: c.id, ref: `rtsp://cam${c.nativeId}.example.invalid:554/LiveStream` }))
+  await saveCameraCatalog(store, { source: 'bma-floodcam', fetchedAt: FETCHED_AT, cameras: cams, refs, warnings: [] })
+}
+
+describe('GET /api/cctv/image: fairness and fallbacks', () => {
+  it('limits upstream-triggering misses per client IP separately from cache hits', async () => {
+    await seedMany(LIMITS.cctvMiss.capacity + 5)
+    const misses = LIMITS.cctvMiss.capacity
+    for (let i = 0; i < misses; i++) expect((await image('bma-floodcam', `${1000 + i}.jpg`, '198.51.100.66')).status).toBe(200)
+    expect(outbound).toHaveLength(misses)
+    // Cache hits stay free for the same client.
+    expect((await image('bma-floodcam', '1000.jpg', '198.51.100.66')).status).toBe(200)
+    const limited = await image('bma-floodcam', `${1000 + misses}.jpg`, '198.51.100.66')
+    expect(limited.status).toBe(429)
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0)
+    expect(limited.headers.get('cache-control')).toBe('no-store')
+    expect(await limited.json()).toEqual({ error: CCTV_MSG.limited, reason: 'limited' })
+    expect(outbound).toHaveLength(misses)
+    // Another client is not affected.
+    expect((await image('bma-floodcam', `${1000 + misses}.jpg`, '203.0.113.50')).status).toBe(200)
+    expect(outbound).toHaveLength(misses + 1)
+  })
+
+  it('has no per-client accounting without a trusted client IP (TRUST_PROXY=none)', async () => {
+    await seedMany(LIMITS.cctvMiss.capacity + 5)
+    await withEnv({ TRUST_PROXY: 'none' }, async () => {
+      for (let i = 0; i < LIMITS.cctvMiss.capacity + 2; i++) expect((await image('bma-floodcam', `${1000 + i}.jpg`)).status).toBe(200)
+    })
+    expect(outbound).toHaveLength(LIMITS.cctvMiss.capacity + 2)
+  })
+
+  it('answers 503 unavailable (not 404) while the source is switched off on this host, and health says why', async () => {
+    await seedLive()
+    const logs: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((m: unknown) => void logs.push(String(m)))
+    try {
+      upstreamDown = true // network errors: this host cannot reach the agency
+      expect((await image('bma-floodcam', '101.jpg')).status).toBe(502)
+      expect((await image('bma-floodcam', '102.jpg')).status).toBe(502)
+      const third = await image('bma-floodcam', '103.jpg')
+      expect(third.status).toBe(503)
+      expect(((await third.json()) as { reason: string }).reason).toBe('unavailable')
+      expect(outbound).toHaveLength(3)
+
+      for (const file of ['201.jpg', '101.jpg']) {
+        const res = await image('bma-floodcam', file)
+        expect(res.status).toBe(503)
+        const retryAfter = Number(res.headers.get('retry-after'))
+        expect(retryAfter).toBeGreaterThan(SOURCE_DOWN_MS / 1000 - 60)
+        expect(retryAfter).toBeLessThanOrEqual(SOURCE_DOWN_MS / 1000)
+        expect(await res.json()).toEqual({ error: CCTV_MSG.unavailable, reason: 'unavailable' })
+      }
+      expect((await image('bma-floodcam', '999.jpg')).status).toBe(404)
+      expect(outbound).toHaveLength(3)
+      expect(logs.filter((l) => l.includes('images unreachable from this server'))).toHaveLength(1)
+
+      const { body } = await cameras()
+      expect(body.cameras.filter((c) => c.source === 'bma-floodcam').every((c) => c.media === 'link')).toBe(true)
+
+      const health = (await (await healthRoute.GET()).json()) as { cameras: Record<string, unknown>[] }
+      const bma = health.cameras.find((c) => c.source === 'bma-floodcam')!
+      expect(bma).toMatchObject({ images: false, imagesReason: 'host-unreachable', frames1h: { ok: 0, fail: 3, refused: 0, budget: 'ok' } })
+      expect(Date.parse(String(bma.imagesUntil)) - Date.now()).toBeGreaterThan(SOURCE_DOWN_MS - 60_000)
+      expect(health.cameras.find((c) => c.source === 'dwr-cctv')).toMatchObject({ images: true, imagesReason: null })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('reports a link-only catalogue and CCTV_IMAGES=0 in health without counters', async () => {
+    await seedLive({ refs: false })
+    const health = (await (await healthRoute.GET()).json()) as { cameras: Record<string, unknown>[] }
+    expect(health.cameras.find((c) => c.source === 'bma-floodcam')).toMatchObject({ images: false, imagesReason: 'link-only', imagesUntil: null, frames1h: null })
+    await withEnv({ CCTV_IMAGES: '0' }, async () => {
+      const off = (await (await healthRoute.GET()).json()) as { cameras: Record<string, unknown>[] }
+      expect(off.cameras.every((c) => c.images === false && c.imagesReason === 'disabled' && c.frames1h === null)).toBe(true)
+    })
+  })
+
+  it('lets an abandoned request leave the source queue at once', async () => {
+    await seedLive()
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      outbound.push(String(input))
+      await held
+      return new Response(jpeg(), { headers: { 'content-type': 'image/jpeg' } })
+    })
+    const policy = CCTV_POLICY['bma-floodcam']
+    const saved = policy.maxInFlight
+    policy.maxInFlight = 1
+    try {
+      const first = image('bma-floodcam', '101.jpg', '198.51.100.1')
+      await vi.waitFor(() => expect(outbound).toHaveLength(1))
+      const ctrl = new AbortController()
+      const started = Date.now()
+      const queued = imageRoute.GET(
+        new Request(`${BASE}/api/cctv/image/bma-floodcam/102.jpg`, { headers: { 'x-forwarded-for': '198.51.100.2' }, signal: ctrl.signal }),
+        ctx('bma-floodcam', '102.jpg'),
+      )
+      await vi.waitFor(() => expect(cctvImageStats('bma-floodcam').queued).toBe(1))
+      ctrl.abort()
+      const res = await queued
+      expect(res.status).toBe(503)
+      expect(((await res.json()) as { reason: string }).reason).toBe('busy')
+      expect(Date.now() - started).toBeLessThan(5_000) // not the 15 s queue wait
+      expect(cctvImageStats('bma-floodcam').queued).toBe(0)
+      release()
+      expect((await first).status).toBe(200)
+      expect(outbound).toHaveLength(1)
+    } finally {
+      policy.maxInFlight = saved
+      stubFetch()
+    }
   })
 })
 
@@ -452,8 +591,9 @@ describe('cameras in /api/health', () => {
     const body = (await res.json()) as { ok: boolean; cameras: { source: string; count: number; images: boolean; frames1h: { ok: number } | null }[] }
     expect(body.ok).toBe(true)
     const bma = body.cameras.find((c) => c.source === 'bma-floodcam')!
-    expect(bma).toMatchObject({ count: BMA_CAMS.length, catalogAt: FETCHED_AT, images: true })
-    expect(bma.frames1h).toMatchObject({ ok: 1, fail: 0, budgetLeft: CCTV_POLICY['bma-floodcam'].hourlyBudget - 1 })
+    expect(bma).toMatchObject({ count: BMA_CAMS.length, catalogAt: FETCHED_AT, images: true, imagesReason: null, imagesUntil: null })
+    // The remaining budget is coarse on purpose (no live feedback for someone draining it).
+    expect(bma.frames1h).toEqual({ ok: 1, fail: 0, refused: 0, budget: 'ok' })
     expect(body.cameras.find((c) => c.source === 'dwr-cctv')).toMatchObject({ count: 1, images: true })
   })
 })

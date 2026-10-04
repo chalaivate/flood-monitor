@@ -26,24 +26,62 @@ import { useNow } from '@/lib/ui/hooks'
 import { IconChevronRight, IconClose, IconPause, IconPlay, IconRefresh } from '../icons'
 import { LevelDot } from '../LevelBadge'
 import { CameraFrame, OfficialLink } from './CameraFrame'
-import { useCameraFrame, useCctvPaused, usePageVisible, useSaveData } from './hooks'
-import { closeCameraViewer, openCameraViewer, useCameraViewer, type ViewerRequest } from './viewer-store'
+import { subscribeCameraListReload, useCameraFrame, useCctvPaused, usePageVisible, useSaveData } from './hooks'
+import { keepViewerFocus } from './viewer-focus'
+import {
+  closeCameraViewer,
+  mountViewerHost,
+  newViewerHostId,
+  openCameraViewer,
+  useCameraViewer,
+  viewerStateFor,
+  type ViewerRequest,
+} from './viewer-store'
 
 /**
  * Camera viewer: a right-hand sheet on wide screens, full screen on phones (native modal
  * <dialog>: Escape closes, focus is trapped and returns to the opener). One camera at a time;
- * switching angle or site remounts the still and aborts its request.
+ * switching angle or site remounts the still and aborts its request. The open state belongs to
+ * this page's viewer: it is dropped when the page goes away, and Back closes the viewer.
  */
 export function CameraViewer() {
-  const v = useCameraViewer()
+  const [hostId] = useState(newViewerHostId)
+  const v = useCameraViewer(hostId)
   const ref = useRef<HTMLDialogElement>(null)
+  const open = v !== null
+
+  // This page's viewer: opens made while it is mounted belong to it, and are dropped (without
+  // moving focus or history) when it unmounts, so the next page never reopens them.
+  useEffect(() => {
+    const d = ref.current
+    const release = mountViewerHost(hostId)
+    return () => {
+      release()
+      // Never leave a modal dialog (and with it an inert page) behind.
+      if (d?.open) d.close()
+    }
+  }, [hostId])
 
   useEffect(() => {
     const d = ref.current
     if (!d) return
     if (v && !d.open) d.showModal()
+    // The request was replaced from inside (chain chip): the focused control is gone.
+    else if (v) keepViewerFocus(d, document.activeElement)
     if (!v && d.open) d.close()
   }, [v])
+
+  // Controls that disappear while focused (retry, the chain chip, a site without angles) must
+  // not drop keyboard focus to <body> behind the modal: move it to the viewer's heading.
+  useEffect(() => {
+    const d = ref.current
+    if (!d || !open || typeof MutationObserver === 'undefined') return
+    const mo = new MutationObserver(() => {
+      if (viewerStateFor(hostId)) keepViewerFocus(d, document.activeElement)
+    })
+    mo.observe(d, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'hidden'] })
+    return () => mo.disconnect()
+  }, [open, hostId])
 
   return (
     <dialog ref={ref} className="fm-dialog fm-sheet" aria-labelledby="cam-viewer-title" onClose={() => closeCameraViewer()}>
@@ -52,8 +90,12 @@ export function CameraViewer() {
   )
 }
 
-// The DWR camera list for the chain, loaded once per page (a few kB).
+// The DWR camera list for the chain, loaded once per page (a few kB), again after a still
+// turned link-only (the list then says which cameras still have stills).
 let chainCache: Promise<CameraSite[]> | null = null
+subscribeCameraListReload(() => {
+  chainCache = null
+})
 
 function loadChain(): Promise<CameraSite[]> {
   if (!chainCache) {
@@ -129,7 +171,7 @@ function ViewerHeader({ title, subtitle }: { title: string; subtitle?: string })
   return (
     <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-3 sm:px-5">
       <div className="min-w-0">
-        <h2 id="cam-viewer-title" className="text-lg leading-snug font-medium">
+        <h2 id="cam-viewer-title" tabIndex={-1} className="text-lg leading-snug font-medium">
           {title}
         </h2>
         {subtitle && <p className="text-sm text-text-2">{subtitle}</p>}
@@ -211,7 +253,7 @@ function SiteViewer({
           </p>
           <p>{CCTV_RIGHTS_TH}</p>
           <p className="flex flex-wrap gap-2 pt-1">
-            <OfficialLink camera={cam} className="fm-btn fm-btn-quiet" />
+            <OfficialLink camera={cam} className="fm-btn fm-btn-quiet" replaceHistory />
             {cam.source === 'dwr-cctv' && !chainMode && (
               <button type="button" className="fm-btn fm-btn-quiet" onClick={() => openCameraViewer({ kind: 'chain' })}>
                 {CCTV_CHAIN_TH}
@@ -238,7 +280,7 @@ function SiteViewer({
 }
 
 /** The still of one camera with its refresh controls (remounted per camera). */
-function ViewerStill({ cam }: { cam: PublicCamera }) {
+export function ViewerStill({ cam }: { cam: PublicCamera }) {
   const globalPaused = useCctvPaused()
   const saveData = useSaveData()
   const visible = usePageVisible()
@@ -265,36 +307,50 @@ function ViewerStill({ cam }: { cam: PublicCamera }) {
     setSession((n) => n + 1)
     frame.reload()
   }
+  const stopped = paused || autoPaused || saveData
 
   return (
     <div>
       <div className="overflow-hidden rounded-xl border border-border">
-        <CameraFrame camera={cam} frame={frame} copy={copy} size="viewer" />
+        <CameraFrame camera={cam} frame={frame} copy={copy} size="viewer" nowMs={nowMs} />
       </div>
       <p className="sr-only" aria-live="polite">
         {copy.live}
       </p>
       {copy.line && <p className="mt-2 text-sm text-text">{copy.line}</p>}
-      {copy.notices.length > 0 && (frame.meta || cam.media === 'link') && (
+      {/* Without a still the frame itself prints the state, so the list would repeat it. */}
+      {copy.notices.length > 0 && frame.meta && (
         <ul className="mt-1.5 flex flex-col gap-1 text-sm text-text-2">
           {copy.notices.map((n) => (
             <li key={n}>{n}</li>
           ))}
         </ul>
       )}
-      {image && (
+      {image && !copy.linkOnly && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          {paused || autoPaused || saveData ? (
-            <button type="button" className="fm-btn fm-btn-primary" onClick={resume} disabled={saveData && frame.loading}>
-              {saveData ? <IconRefresh size={16} /> : <IconPlay size={16} />} {saveData ? 'โหลดภาพใหม่' : CCTV_RESUME_TH}
-            </button>
-          ) : (
-            <button type="button" className="fm-btn fm-btn-quiet" onClick={() => setPaused(true)}>
-              <IconPause size={16} /> หยุดรีเฟรช
-            </button>
-          )}
-          {!(paused || autoPaused || saveData) && (
-            <button type="button" className="fm-btn fm-btn-quiet" onClick={() => frame.reload()} disabled={frame.loading}>
+          {/* One button that changes role, so keyboard focus stays on it. */}
+          <button
+            type="button"
+            className={`fm-btn ${stopped ? 'fm-btn-primary' : 'fm-btn-quiet'}`}
+            aria-disabled={saveData && frame.loading ? true : undefined}
+            onClick={() => {
+              if (!stopped) setPaused(true)
+              else if (!(saveData && frame.loading)) resume()
+            }}
+          >
+            {!stopped ? <IconPause size={16} /> : saveData ? <IconRefresh size={16} /> : <IconPlay size={16} />}{' '}
+            {!stopped ? 'หยุดรีเฟรช' : saveData ? 'โหลดภาพใหม่' : CCTV_RESUME_TH}
+          </button>
+          {!stopped && (
+            // aria-disabled, not disabled: a disabled button drops keyboard focus while loading.
+            <button
+              type="button"
+              className="fm-btn fm-btn-quiet aria-disabled:opacity-60"
+              aria-disabled={frame.loading ? true : undefined}
+              onClick={() => {
+                if (!frame.loading) frame.reload()
+              }}
+            >
               <IconRefresh size={16} className={frame.loading ? 'fm-spin' : ''} /> โหลดภาพใหม่
             </button>
           )}
