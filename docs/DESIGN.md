@@ -53,6 +53,9 @@ Deployment modes (docs/DEPLOY.md):
 | `src/lib/sources/*` | One adapter per upstream (`SourceAdapter`), `index.ts` → `getSources(config)`. |
 | `src/lib/weather/*` | `getWeather(lat, lng)` (Open-Meteo, cached). |
 | `src/lib/radar.ts` | `radarImages()` list for the dashboard. |
+| `src/lib/sources/cameras/*` | CCTV camera catalogue adapters (`CameraCatalogAdapter`): `bma-floodcam`, `dwr-cctv`, `demo-cam`. |
+| `src/lib/cameras/*` | Camera catalogues in Store meta (public list + server-only refs), refresh scheduling, station join. |
+| `src/lib/server/cctv-proxy.ts`, `image-cache.ts`, `cctv-demo-image.ts` | On-demand camera stills: allowlist, shared cache, budgets; demo SVG. |
 | `src/lib/store/*` | `Store` interface, `SqliteStore`, `SupabaseStore`, `index.ts` → `getStore()`. |
 | `src/lib/notify/*` | `ChannelSender` per channel + `index.ts` → `getSenders()`. |
 | `src/lib/server/*` | Server helpers: auth (manage token), validation schemas, JSON responses, rate limit. |
@@ -60,6 +63,40 @@ Deployment modes (docs/DEPLOY.md):
 | `src/app/**/page.tsx`, `src/components/**` | UI (see §6). |
 | `worker/poll.ts` | Standalone poller (`--once`, `--relay <url>`). |
 | `supabase/migrations/*.sql` | Postgres schema mirroring the SQLite schema. |
+
+## 2a. CCTV cameras
+
+Cameras are **not** Stations: no readings, no status, no alerts. Images are stills fetched on
+demand and never influence status.
+
+- **Catalogues** (`src/lib/sources/cameras/*` → `src/lib/cameras/catalog.ts`):
+  `bma-floodcam` (DDS flood-watch cameras, `floodbangkok…/items/camera_profile`, Thai IP only,
+  daily, drifting to 03:00), `dwr-cctv` (DWR river telemetry cameras, central plains, weekly),
+  `demo-cam` (fixture mode). The poll cycle refreshes due catalogues after ingest → alerts → prune
+  (embedded worker, `worker/poll.ts` and `/api/cron/poll` opt in); a failure never affects the cycle
+  and keeps the last good list.
+- **Storage** (Store meta, per source): `cctv:catalog:<src>` public list, `cctv:refs:<src>`
+  server-only upstream references (BMA stream address, DWR snapshot id — never in an API
+  response, log or relay), `cctv:index:<src>` (commit point), `cctv:status:<src>` (refresh
+  bookkeeping). A list under 50% of the previous size is refused until it repeats ≥ 3 times
+  over ≥ 24 h. `nearStationIds` (road ≤ 50 m, canal/river ≤ 150 m) is computed at save time.
+- **Relay**: `/api/ingest` accepts `cameraCatalogs` (public fields only, zod-validated, ≤ 5
+  lists / 5000 cameras); a relayed list drops this host's refs, so that source is link-only here.
+- **Images** (`/api/cctv/image/[source]/[nativeId].jpg`): served only when `CCTV_IMAGES=1` and
+  this host holds the source's refs (it fetched the list itself). Checks before any upstream call:
+  source enabled, camera in catalogue, per-IP limit. Upstream hosts are fixed per source and URLs
+  are built server-side; one request per camera shared by all viewers.
+
+  | | `bma-floodcam` | `dwr-cctv` |
+  |---|---|---|
+  | Fresh / fail / stale max | 60 s / 60 s / 15 min | 5 min / 60 s / 60 min |
+  | In flight (queue) | 3 (20) | 2 (10) |
+  | Hourly upstream budget | 600 | 240 |
+
+  JPEG magic check, trim after the last `FF D9`, 2 MB cap, frozen-frame hash (`X-Cctv-Changed-At`).
+  Frames live in memory only (LRU ≈ 300). A host that never got a frame for a source and fails
+  3 times in a row shows agency links for 30 minutes (e.g. a Vercel app sharing a Supabase store
+  with the Thai worker). Demo mode returns a generated SVG labelled "ภาพจำลอง".
 
 ## 3. Data model rules
 
@@ -107,7 +144,15 @@ Public (no auth):
   `LINE_ADD_FRIEND_URL`; Telegram token + webhook secret + bot username; e-mail Resend key + `EMAIL_FROM` + a valid
   `PUBLIC_BASE_URL`); `telegramBot`, `lineAddFriendUrl`, `vapidPublicKey` are null unless that channel is offered.
   Half-configured channels are logged once at server/worker start.
-- `GET /api/health` → `{ ok, dataMode, lastIngestAt, lastAlertsAt, sources: SourceHealth[] }`.
+- `GET /api/health` → `{ ok, dataMode, lastIngestAt, lastAlertsAt, sources: SourceHealth[], cameras: [{ source, ok, catalogAt, count, lastError, images, frames1h, lastFrame }] }` (cameras never change `ok`).
+- `GET /api/cctv/cameras?lat&lng&r&n` → `CamerasResponse`: every camera of the nearest `n` sites
+  (default 4, ≤ 24) within `r` km (default 3, 0.5–20), with `distanceKm`, `media: 'image' | 'link'`,
+  `imageUrl`, `refreshSec`; `nearestOutsideKm`; `links[]` (agency camera pages we only link to);
+  `catalogAt`. Without lat/lng: every camera (map layer).
+- `GET /api/cctv/image/[source]/[file]` (`<nativeId>.jpg`, `.svg` in demo) → still with
+  `X-Cctv-Fetched-At`, `X-Cctv-Captured-At` (DWR), `X-Cctv-Changed-At`, `X-Cctv-Stale`,
+  `Cache-Control`, `CSP default-src 'none'`, `nosniff`, `CORP same-origin`. Errors are JSON
+  `{ error, reason }`: 404 not-found, 429 (per IP), 502 unreachable / no-image, 503 busy / budget.
 - `GET /api/radar/bma/[site]` (`nongchok` | `nongkhaem`) → proxied JPEG (cached ~4 min), 502 when unreachable.
 
 Place management (`Authorization: Bearer <manageToken>` for everything except create):
@@ -164,9 +209,21 @@ Routes:
   - Out of coverage (`snapshot.coverage.nearestWaterKm` beyond the radius): "สถานีวัดน้ำที่ใกล้ที่สุดอยู่ห่าง X กม. —
     อยู่นอกพื้นที่ครอบคลุม" with "เลือกตำแหน่งอื่น"; within reach: "ขยายรัศมีเป็น N กม."; no recent data anywhere: says so.
   - Banners: demo-data banner (`dataMode = fixture`), stale-data banner (lastIngestAt older than 3× poll),
+  - **กล้อง CCTV ใกล้บ้าน** (`src/components/cctv/CameraCard.tsx`, area `cam`): full-width row above the
+    legend (after radar in the DOM). One `/api/cctv/cameras` request per place (r = max(radius, 10), n = 12),
+    2×2 tiles (4 across from 48rem), one per site with an "N มุม" badge, distance, credit, time badge and
+    the joined sensor's own level; sites whose sensor is ≥ watch first; "นอกรัศมี" fill up to 10 km.
+    Tiles refresh every 180 s only when on screen, tab visible, not paused (`localStorage['fm-cctv-paused']`)
+    and not Save-Data. Viewer (`CameraViewer.tsx`, dialog/sheet): every 60 s, auto-pause after 5 min,
+    angle and site switching, rights line, "เปิดเว็บทางการ" (`noopener noreferrer`). Stills are fetched →
+    blob → object URL (swap after decode, revoke). States and Thai copy in `src/lib/ui/cctv.ts`
+    (BMA stale after 5 min; DWR by capture time: stale 45 min, old 24 h; frozen = same picture ≥ 15 min or
+    3 upload intervals). Never "สด"/"LIVE"; never implies dry/normal from an image.
     "set your location" prompt when using the default place.
   - Auto-refresh every 60 s; manual refresh button.
 - `/map` all stations (Leaflet + OSM tiles) coloured by level, filter by kind, RainViewer overlay toggle,
+  "กล้อง CCTV" layer (off by default; `?cams=1`; neutral camera markers, popup ดูภาพ / เปิดเว็บทางการ;
+  station popups get "ดูกล้องที่จุดนี้ (N มุม)"),
   click map / "ใช้ตำแหน่งของฉัน" / paste Google Maps link to set home, radius circle, list of nearest.
 - `/alerts` set up alerts: place form (label, location picker, radius, thresholds, min level),
   channel cards (Web Push on this device, LINE, Telegram, ntfy, Email, Discord) with clear Thai
