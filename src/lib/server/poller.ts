@@ -1,7 +1,10 @@
+import { catalogDue, isCameraSourceId, publicCatalog, refreshCameraCatalogs, type CameraCatalogReport } from '../cameras/catalog'
 import type { AppConfig } from '../config'
 import { fetchPolitely, runAlerts, runIngest, type AlertReport, type CycleDeps, type IngestReport } from '../pipeline'
+import { redactSecrets } from '../sources/cameras/common'
+import type { CameraCatalogAdapter } from '../sources/cameras/types'
 import type { SourceAdapter } from '../sources/types'
-import type { SourceFetchResult, SourceId } from '../types'
+import type { CameraCatalog, CameraSourceId, SourceFetchResult, SourceId } from '../types'
 import type { Logger } from './log'
 
 // Polling loop shared by worker/poll.ts, the embedded worker (instrumentation) and
@@ -12,6 +15,8 @@ export interface CycleSummary {
   /** null when RUN_ALERTS=0 in this process. */
   alerts: AlertReport | null
   pruned: number
+  /** Camera catalogue refreshes (empty unless the cycle ran with `cameras: true`). */
+  cameras: CameraCatalogReport[]
   /** Every enabled source failed (or none is enabled). */
   allFailed: boolean
   durationMs: number
@@ -31,22 +36,33 @@ export interface PollCycleOptions {
    * cycle after the restart evaluates the same readings.
    */
   signal?: AbortSignal
+  /**
+   * Also refresh the CCTV camera catalogues that are due (CCTV_SOURCES), after alerts and
+   * pruning so they never delay them. Opt-in: the long-running pollers pass true. Failures are
+   * recorded per source and never fail the cycle.
+   */
+  cameras?: boolean
 }
 
-/** ingest → alerts (if enabled) → prune readings older than HISTORY_HOURS. */
+/** ingest → alerts (if enabled) → prune readings older than HISTORY_HOURS → camera catalogues (opt-in). */
 export async function runPollCycle(deps: CycleDeps, opts: PollCycleOptions = {}): Promise<CycleSummary> {
   const started = Date.now()
   const ingest = await runIngest(deps)
   if (opts.signal?.aborted) {
     deps.log?.('[poll] shutting down: alerts and pruning skipped for this cycle')
-    return { ingest, alerts: null, pruned: 0, allFailed: ingest.results.every((r) => !r.ok), durationMs: Date.now() - started }
+    return { ingest, alerts: null, pruned: 0, cameras: [], allFailed: ingest.results.every((r) => !r.ok), durationMs: Date.now() - started }
   }
   const alerts = deps.config.RUN_ALERTS === '1' ? await runAlerts(deps) : null
   const pruned = await pruneOldReadings(deps)
+  const cameras =
+    opts.cameras && !opts.signal?.aborted
+      ? await refreshCameraCatalogs({ store: deps.store, config: deps.config, fetch: deps.fetch, now: deps.now, log: deps.log, signal: opts.signal })
+      : []
   return {
     ingest,
     alerts,
     pruned,
+    cameras,
     allFailed: ingest.results.every((r) => !r.ok),
     durationMs: Date.now() - started,
   }
@@ -75,7 +91,9 @@ export function summarize(s: CycleSummary): string {
   const ok = s.ingest.results.filter((r) => r.ok).length
   const inserted = s.ingest.results.reduce((n, r) => n + r.inserted, 0)
   const alerts = s.alerts ? `${s.alerts.events.length} alert(s) for ${s.alerts.places} place(s)` : 'alerts disabled'
-  return `cycle done in ${(s.durationMs / 1000).toFixed(1)}s: ${ok}/${s.ingest.results.length} sources ok, ${inserted} new readings, ${alerts}, pruned ${s.pruned}`
+  const refreshed = s.cameras.filter((c) => !c.skipped)
+  const cams = refreshed.length ? `, camera lists: ${refreshed.map((c) => `${c.source} ${c.ok ? c.count : 'failed'}`).join(', ')}` : ''
+  return `cycle done in ${(s.durationMs / 1000).toFixed(1)}s: ${ok}/${s.ingest.results.length} sources ok, ${inserted} new readings, ${alerts}, pruned ${s.pruned}${cams}`
 }
 
 // --- loop ---------------------------------------------------------------------------
@@ -149,15 +167,72 @@ export interface RelayOptions {
   sleep?: (ms: number) => Promise<void>
   /** Delays before each POST retry. */
   retryDelaysMs?: number[]
+  /**
+   * Camera catalogue adapters to fetch when due and push with the readings. Only the public
+   * camera fields are sent: upstream refs (stream addresses) never leave this machine.
+   */
+  cameraSources?: CameraCatalogAdapter[]
+  /** Schedule kept across cycles (the relay has no store); defaults to a per-process one. */
+  cameraState?: RelayCameraState
 }
 
 export interface RelaySummary {
   ok: boolean
   results: { source: SourceId; ok: boolean; stations: number; readings: number; error?: string }[]
+  /** Camera lists fetched (or re-sent) this cycle. */
+  cameras: { source: CameraSourceId; ok: boolean; count: number; error?: string }[]
   inserted: number | null
   error?: string
   allFailed: boolean
 }
+
+interface RelayCameraEntry {
+  lastAttemptAt: string | null
+  /** fetchedAt of the last list fetched here. */
+  lastSuccessAt: string | null
+  failures: number
+  /** Fetched but not yet accepted by the server (re-sent next cycle). */
+  pending: CameraCatalog | null
+}
+
+/** In-memory schedule of the camera lists a relay pushes (one per worker process). */
+export type RelayCameraState = Map<CameraSourceId, RelayCameraEntry>
+
+export function createRelayCameraState(): RelayCameraState {
+  return new Map()
+}
+
+/**
+ * Schedule only (timestamps and counters, never camera lists or refs), so `--relay --once` runs
+ * started by a task scheduler do not refetch the lists every time. A list fetched but not yet
+ * delivered is forgotten, so the next run fetches it again.
+ */
+export function serializeRelayCameraState(state: RelayCameraState): string {
+  const out: Record<string, { lastAttemptAt: string | null; lastSuccessAt: string | null; failures: number }> = {}
+  for (const [source, e] of state) out[source] = { lastAttemptAt: e.lastAttemptAt, lastSuccessAt: e.pending ? null : e.lastSuccessAt, failures: e.failures }
+  return JSON.stringify(out)
+}
+
+export function parseRelayCameraState(text: string | null): RelayCameraState {
+  const state = createRelayCameraState()
+  let raw: unknown
+  try {
+    raw = text ? JSON.parse(text) : null
+  } catch {
+    return state
+  }
+  if (!raw || typeof raw !== 'object') return state
+  const iso = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : null)
+  for (const [source, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isCameraSourceId(source) || !v || typeof v !== 'object') continue
+    const e = v as Record<string, unknown>
+    const failures = typeof e.failures === 'number' && Number.isInteger(e.failures) && e.failures >= 0 ? Math.min(e.failures, 100) : 0
+    state.set(source, { lastAttemptAt: iso(e.lastAttemptAt), lastSuccessAt: iso(e.lastSuccessAt), failures, pending: null })
+  }
+  return state
+}
+
+const defaultRelayCameraState = createRelayCameraState()
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -170,17 +245,78 @@ export function ingestUrl(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/api/ingest`
 }
 
+interface RelayCameraBatch {
+  catalogs: CameraCatalog[]
+  failures: { source: CameraSourceId; error: string; attemptedAt: string }[]
+  report: RelaySummary['cameras']
+}
+
+/** A camera list fetch in relay mode must finish within this. */
+const CATALOG_RELAY_DEADLINE_MS = 120_000
+
+/** Fetch the camera lists that are due (in-memory schedule); keep unsent ones for the next push. */
+async function relayCameraCatalogs(opts: RelayOptions, now: Date): Promise<RelayCameraBatch> {
+  const batch: RelayCameraBatch = { catalogs: [], failures: [], report: [] }
+  const state = opts.cameraState ?? defaultRelayCameraState
+  const adapters = (opts.cameraSources ?? []).filter((a) => a.id !== 'demo-cam')
+  await Promise.all(
+    adapters.map(async (a) => {
+      let st = state.get(a.id)
+      if (!st) state.set(a.id, (st = { lastAttemptAt: null, lastSuccessAt: null, failures: 0, pending: null }))
+      const due = catalogDue({
+        source: a.id,
+        refreshHours: a.refreshHours,
+        thaiIpOnly: a.thaiIpOnly,
+        fetchedAt: st.lastSuccessAt,
+        local: true,
+        lastAttemptAt: st.lastAttemptAt,
+        failures: st.failures,
+        now,
+      })
+      let error: string | undefined
+      if (due) {
+        st.lastAttemptAt = now.toISOString()
+        try {
+          const result = await a.fetchCatalog({
+            fetch: opts.fetch,
+            now,
+            timeoutMs: opts.config.FETCH_TIMEOUT_MS,
+            sleep: opts.sleep,
+            signal: AbortSignal.timeout(CATALOG_RELAY_DEADLINE_MS),
+          })
+          // Public fields only: the refs stay here (the receiving server cannot use them).
+          st.pending = publicCatalog(result)
+          st.lastSuccessAt = result.fetchedAt
+          st.failures = 0
+          opts.log(`[relay] ${a.id} camera list: ${st.pending.cameras.length} camera(s)`)
+        } catch (err) {
+          st.failures++
+          error = redactSecrets(errText(err))
+          batch.failures.push({ source: a.id, error, attemptedAt: now.toISOString() })
+          opts.log(`[relay] ${a.id} camera list FAILED: ${error}`)
+        }
+      }
+      // An earlier list the server has not accepted yet is sent again.
+      if (st.pending) batch.catalogs.push(st.pending)
+      if (due || st.pending) batch.report.push({ source: a.id, ok: !error, count: st.pending?.cameras.length ?? 0, ...(error ? { error } : {}) })
+    }),
+  )
+  return batch
+}
+
 /** Fetch Thai-only sources locally and push them to `<baseUrl>/api/ingest`. */
 export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
   const now = opts.now?.() ?? new Date()
   // Same politeness as runIngest: sources on one upstream host (all bma-* live on
-  // weather.bangkok.go.th, whose WAF bans bursts) run one after another.
-  const settled = await fetchPolitely(opts.sources, (s) =>
-    s.fetch({ fetch: opts.fetch, now, timeoutMs: opts.config.FETCH_TIMEOUT_MS, sleep: opts.sleep }),
-  )
+  // weather.bangkok.go.th, whose WAF bans bursts) run one after another. Camera lists come
+  // from other hosts and are fetched alongside.
+  const [settled, cams] = await Promise.all([
+    fetchPolitely(opts.sources, (s) => s.fetch({ fetch: opts.fetch, now, timeoutMs: opts.config.FETCH_TIMEOUT_MS, sleep: opts.sleep })),
+    relayCameraCatalogs(opts, now),
+  ])
   const results: SourceFetchResult[] = []
   const failures: { source: SourceId; error: string; attemptedAt: string }[] = []
-  const summary: RelaySummary = { ok: false, results: [], inserted: null, allFailed: true }
+  const summary: RelaySummary = { ok: false, results: [], cameras: cams.report, inserted: null, allFailed: true }
   settled.forEach((res, i) => {
     const src = opts.sources[i]!
     if (res.status === 'fulfilled') {
@@ -196,7 +332,12 @@ export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
   })
 
   const url = ingestUrl(opts.baseUrl)
-  const body = JSON.stringify({ results, failures })
+  const body = JSON.stringify({
+    results,
+    failures,
+    ...(cams.catalogs.length ? { cameraCatalogs: cams.catalogs } : {}),
+    ...(cams.failures.length ? { cameraFailures: cams.failures } : {}),
+  })
   const delays = opts.retryDelaysMs ?? [5_000, 15_000, 30_000]
   const sleep = opts.sleep ?? defaultSleep
   for (let attempt = 0; ; attempt++) {
@@ -211,9 +352,19 @@ export async function runRelayCycle(opts: RelayOptions): Promise<RelaySummary> {
       const text = await res.text().catch(() => '')
       if (res.ok) {
         try {
-          summary.inserted = (JSON.parse(text) as { inserted?: number }).inserted ?? null
+          const answer = JSON.parse(text) as { inserted?: number; cameras?: { source?: string; saved?: boolean; warning?: string | null }[] }
+          summary.inserted = answer.inserted ?? null
+          for (const c of Array.isArray(answer.cameras) ? answer.cameras : []) {
+            if (c && c.saved === false && c.warning) opts.log(`[relay] server kept its ${String(c.source)} camera list: ${String(c.warning).slice(0, 200)}`)
+          }
         } catch {
           summary.inserted = null
+        }
+        // Delivered: the server decides whether to keep each list.
+        const state = opts.cameraState ?? defaultRelayCameraState
+        for (const cat of cams.catalogs) {
+          const st = state.get(cat.source)
+          if (st?.pending === cat) st.pending = null
         }
         summary.ok = true
         summary.error = undefined

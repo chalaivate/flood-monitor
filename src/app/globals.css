@@ -463,13 +463,26 @@ body {
       height: 100%;
     }
   }
+  /* Camera viewer: a right-hand sheet on wider screens (phones: the full-screen dialog above). */
+  @media (min-width: 640px) {
+    .fm-dialog.fm-sheet {
+      margin: 0 0 0 auto;
+      width: min(600px, 100vw);
+      max-width: 100vw;
+      height: 100dvh;
+      max-height: 100dvh;
+      border-width: 0 0 0 1px;
+      border-radius: 16px 0 0 16px;
+    }
+  }
 
   /* Dashboard grid. The DOM holds the cards in phone priority order (situation, gauges,
-     history, rain, road flood, weather, radar, legend); wider layouts only place them so
+     history, rain, road flood, weather, radar, cameras, legend); wider layouts only place them so
      they still read row by row: DOM order = visual order = keyboard/screen-reader order.
      Never reorder with `order` or `display: contents` here (WCAG 1.3.2 / 2.4.3).
      The `minmax(0, 1fr)` row absorbs the height difference next to a spanning card, so
-     the stacked cards beside it keep a plain 0.75rem gap. */
+     the stacked cards beside it keep a plain 0.75rem gap. The camera card (`cam`, rendered
+     only when the server has cameras) is a full-width row above the legend. */
   .fm-dash {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -482,22 +495,23 @@ body {
   @media (min-width: 48rem) {
     .fm-dash {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+      grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
       grid-template-areas:
         'sit gauge'
         'history rain'
         'history road'
-        'history .'
         'weather radar'
+        'cam cam'
         'legend legend';
     }
     .fm-dash[data-road='0'] {
-      grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+      grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
       grid-template-areas:
         'sit gauge'
         'history rain'
         'history .'
         'weather radar'
+        'cam cam'
         'legend legend';
     }
     .fm-dash > [data-area='sit'] {
@@ -515,6 +529,9 @@ body {
     .fm-dash > [data-area='road'] {
       grid-area: road;
     }
+    .fm-dash > [data-area='cam'] {
+      grid-area: cam;
+    }
     .fm-dash > [data-area='weather'] {
       grid-area: weather;
     }
@@ -526,26 +543,27 @@ body {
     }
   }
   /* Desktop: weather starts right under the (usually shorter) gauges; the lower band then
-     reads column by column (rain + road flood, weather, radar), still the DOM order. */
+     reads column by column (rain + road flood, weather, radar), still the DOM order; the
+     cameras run full width underneath. */
   @media (min-width: 64rem) {
     .fm-dash {
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
       grid-template-areas:
         'sit gauge history'
         'sit weather history'
         'rain weather radar'
         'road weather radar'
-        '. weather radar'
+        'cam cam cam'
         'legend legend legend';
     }
     .fm-dash[data-road='0'] {
-      grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+      grid-template-rows: auto auto minmax(0, 1fr) auto auto;
       grid-template-areas:
         'sit gauge history'
         'sit weather history'
         'rain weather radar'
-        '. weather radar'
+        'cam cam cam'
         'legend legend legend';
     }
   }
@@ -640,9 +658,21 @@ html .leaflet-container .leaflet-bar a.leaflet-disabled {
   color: var(--muted);
 }
 .fm-level-icon,
-.fm-home-icon {
+.fm-home-icon,
+.fm-cam-icon {
   background: transparent;
   border: 0;
+}
+.fm-cam-icon svg {
+  display: block;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.45));
+}
+/* leaflet.css colours every popup link; buttons styled as links keep their own colours. */
+html .leaflet-container a.fm-btn-quiet {
+  color: var(--text);
+}
+html .leaflet-container a.fm-btn-primary {
+  color: var(--accent-ink);
 }
 .fm-level-icon svg {
   display: block;

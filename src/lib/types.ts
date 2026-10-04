@@ -353,7 +353,8 @@ export interface Camera {
 
 /**
  * Server-only upstream reference used to fetch a camera's image (BMA LiveStream address,
- * DWR station code). Never part of an API response, never logged, never relayed.
+ * DWR reportCctv snapshot id, demo station id). Never part of an API response, never logged,
+ * never relayed.
  */
 export interface CameraRef {
   cameraId: string

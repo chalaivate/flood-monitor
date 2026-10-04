@@ -165,7 +165,10 @@ export interface CamerasResponse {
   generatedAt: string
   /** When each enabled source's camera list was last refreshed (null = never). */
   catalogAt: Partial<Record<CameraSourceId, string | null>>
-  /** Nearest first when lat/lng were given (within r km, at most n), else every camera. */
+  /**
+   * Nearest first when lat/lng were given: every camera of the nearest sites within r km, at
+   * most n sites (all angles of a chosen site are included). Without lat/lng: every camera.
+   */
   cameras: PublicCamera[]
   /** Distance to the nearest camera outside the radius (lat/lng queries only). */
   nearestOutsideKm: number | null

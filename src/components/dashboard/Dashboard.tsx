@@ -1,9 +1,10 @@
 'use client'
 
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import type { DashboardSnapshot, HistoryPoint } from '@/lib/types'
 import { LEVEL_ORDER } from '@/lib/types'
 import type { DataMode } from '@/lib/ui/api'
+import { sensorFromStatus, sensorIndex } from '@/lib/ui/cctv'
 import { bkkTime } from '@/lib/ui/chart'
 import { coverageHintTh, waterCoverage } from '@/lib/ui/coverage'
 import { openLocationDialog } from '@/lib/ui/dialog'
@@ -12,6 +13,9 @@ import { sourceLabel } from '@/lib/ui/levels'
 import { notifyPlaceChanged, readStoredPlace, shareUrl, stripPlaceParams, type ResolvedPlace } from '@/lib/ui/place'
 import { minutesBetween } from '@/lib/time'
 import { Banner } from '../Banner'
+import { CameraCard, camerasEnabled } from '../cctv/CameraCard'
+import { CameraViewer } from '../cctv/CameraViewer'
+import { useNearbyCameras } from '../cctv/hooks'
 import { CopyButton } from '../CopyButton'
 import { IconAlert, IconLink, IconRefresh } from '../icons'
 import { GaugeGrid } from './GaugeGrid'
@@ -55,6 +59,7 @@ export function Dashboard({ snapshot, place, dataMode, nowMs, history, status, o
       ) : (
         <LoadingGrid />
       )}
+      <CameraViewer />
     </main>
   )
 }
@@ -251,6 +256,10 @@ function Grid({
   const p = snapshot.place
   const hasRoad = snapshot.roadFlood.length > 0
   const water = waterCoverage(snapshot)
+  // Cameras are optional: the card appears once the camera list has loaded and the server has
+  // camera sources switched on. Joined sensors come from this snapshot (status never from images).
+  const cams = useNearbyCameras({ lat: p.lat, lng: p.lng, radiusKm: p.radiusKm })
+  const sensors = useMemo(() => sensorIndex([...snapshot.roadFlood, ...snapshot.water].map(sensorFromStatus)), [snapshot.roadFlood, snapshot.water])
   // Cards in phone priority order; .fm-dash (globals.css) places them on wider screens
   // without reordering, so DOM, visual and focus order stay the same.
   return (
@@ -285,6 +294,11 @@ function Grid({
       <div data-area="radar">
         <RadarCard lat={p.lat} lng={p.lng} radiusKm={p.radiusKm} images={snapshot.radar} nowMs={nowMs} />
       </div>
+      {camerasEnabled(cams.data) && (
+        <div data-area="cam">
+          <CameraCard data={cams.data} place={p} sensors={sensors} nowMs={nowMs} />
+        </div>
+      )}
       <div data-area="legend">
         <LegendCard snapshot={snapshot} nowMs={nowMs} />
       </div>

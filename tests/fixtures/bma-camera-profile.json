@@ -1,0 +1,192 @@
+{
+ "_fixture_note": "SYNTHESIZED camera_profile body (shape per madaka world_cameras.py; UNVERIFIED upstream). Names/coordinates are public facts from the floodbangkok relay copy (2026-10-03); ids are invented; LiveStream values are fake example.invalid addresses. Never commit real LiveStream values or frames.",
+ "data": [
+  {
+   "id": "101",
+   "CameraName": "CM1-WL-50-C1",
+   "LiveStream": "rtsp://example.invalid/cam/101",
+   "Lat": 13.7634,
+   "Long": 100.624,
+   "camera_description": "1. สะพานข้ามคลองแสนแสบ ซอยลาดพร้าว 122 (มหาดไทย)-CAM1"
+  },
+  {
+   "id": "102",
+   "CameraName": "CM1-WL-50-C2",
+   "LiveStream": "rtsp://example.invalid/cam/102",
+   "Lat": 13.7634,
+   "Long": 100.624,
+   "camera_description": "1. สะพานข้ามคลองแสนแสบ ซอยลาดพร้าว 122 (มหาดไทย)-CAM2"
+  },
+  {
+   "id": 103,
+   "CameraName": "CM1-WL-50-C3",
+   "LiveStream": "rtsp://example.invalid/cam/103",
+   "Lat": "13.7634",
+   "Long": "100.624",
+   "camera_description": "1. สะพานข้ามคลองแสนแสบ ซอยลาดพร้าว 122 (มหาดไทย)-CAM3"
+  },
+  {
+   "id": "201",
+   "CameraName": "CM2-SL-102-C3",
+   "LiveStream": "rtsp://example.invalid/cam/201",
+   "Lat": 13.73602,
+   "Long": 100.63801,
+   "camera_description": "ชุมชนหมู่บ้านพลเทพ ซอยพัฒนาการ 54-CAM3"
+  },
+  {
+   "id": "202",
+   "CameraName": "CM3-SL-65-C1",
+   "LiveStream": "rtsp://example.invalid/cam/202",
+   "Lat": 13.73602,
+   "Long": 100.63801,
+   "camera_description": "ปากซอย พัฒนาการ 44-CAM1"
+  },
+  {
+   "id": "301",
+   "CameraName": "CM1-JJ-8-C1",
+   "LiveStream": "rtsp://example.invalid/cam/301",
+   "Lat": 13.84029,
+   "Long": 100.54611,
+   "camera_description": "ปากซอยเทศบาลรังรักษ์เหนือฝั่งประชานิเวศน์ 1-CAM1"
+  },
+  {
+   "id": "302",
+   "CameraName": "CM1-JJ-8-C2",
+   "LiveStream": "rtsp://example.invalid/cam/302",
+   "Lat": 13.84029,
+   "Long": 100.54611,
+   "camera_description": "ปากซอยเทศบาลรังรักษ์เหนือฝั่งประชานิเวศน์ 1-CAM2"
+  },
+  {
+   "id": "401",
+   "CameraName": "CM1-KP-36-C2",
+   "LiveStream": "rtsp://example.invalid/cam/401",
+   "Lat": 13.76685,
+   "Long": 100.6477,
+   "camera_description": "หน้าสำนักงานเขตบางกะปิ (3)-CAM2"
+  },
+  {
+   "id": "402",
+   "CameraName": "CM3-KP-224-C1",
+   "LiveStream": "rtsp://example.invalid/cam/402",
+   "Lat": 13.76781,
+   "Long": 100.64778,
+   "camera_description": "ตรงข้ามนวมินทร์ 2 CAM1"
+  },
+  {
+   "id": "501",
+   "CameraName": "CM1-BA-184-C1",
+   "LiveStream": "rtsp://example.invalid/cam/501",
+   "Lat": 13.86235,
+   "Long": 100.58902,
+   "camera_description": "ชุมชนสามัคคีร่วมใจ (1)-CAM1"
+  },
+  {
+   "id": "502",
+   "CameraName": "CM1-JJ-51-C1",
+   "LiveStream": "rtsp://example.invalid/cam/502",
+   "Lat": 13.86235,
+   "Long": 100.58902,
+   "camera_description": null
+  },
+  {
+   "id": "601",
+   "CameraName": "CCTV บางเขนใหม่",
+   "LiveStream": "rtsp://example.invalid/cam/601",
+   "Lat": 13.8712,
+   "Long": 100.60095,
+   "camera_description": ""
+  },
+  {
+   "id": "701",
+   "CameraName": "SB-KT-10-C1 บริเวณหน้าบ้านสบายสปา สุขุมวิท 26 - CAM1",
+   "LiveStream": "rtsp://example.invalid/cam/701",
+   "Lat": 13.72461,
+   "Long": 100.5701,
+   "camera_description": "บริเวณหน้าบ้านสบายสปา สุขุมวิท 26 - CAM1"
+  },
+  {
+   "id": "801",
+   "CameraName": "CM3-KP-221-C1",
+   "LiveStream": "rtsp://example.invalid/cam/801",
+   "Lat": 13.7597,
+   "Long": 100.61982,
+   "camera_description": "สะพานลอยก่อนทางเข้าหน้า มหาลัยรามคำแหง-CAM1"
+  },
+  {
+   "id": "802",
+   "CameraName": "CB-WL-21-C3",
+   "LiveStream": "rtsp://example.invalid/cam/802",
+   "Lat": 13.76142,
+   "Long": 100.59725,
+   "camera_description": "เชิงสะพานคลองลาดพร้าว ถนนประดิษฐ์มนูธรรม-CAM3"
+  },
+  {
+   "id": "803",
+   "CameraName": "SB-WT-13-C2",
+   "LiveStream": "rtsp://example.invalid/cam/803",
+   "Lat": "100.5743",
+   "Long": "13.72729",
+   "camera_description": "ปากซอยสุขุมวิท 47 - CAM2"
+  },
+  {
+   "id": "../cam 804",
+   "CameraName": "SB-BN-12-C2",
+   "LiveStream": "rtsp://example.invalid/cam/804",
+   "Lat": 13.66584,
+   "Long": 100.6422,
+   "camera_description": null,
+   "token": "fixture-secret-not-for-output",
+   "internal_ip": "10.0.0.9"
+  },
+  {
+   "id": "901",
+   "CameraName": "CM9-XX-1-C1",
+   "LiveStream": null,
+   "Lat": 13.75,
+   "Long": 100.55,
+   "camera_description": "ไม่มีลิงก์ภาพ-CAM1"
+  },
+  {
+   "id": "902",
+   "CameraName": "CM9-XX-2-C1",
+   "LiveStream": "javascript:alert(1)",
+   "Lat": 13.75,
+   "Long": 100.55,
+   "camera_description": "ลิงก์ผิดรูปแบบ-CAM1"
+  },
+  {
+   "id": "903",
+   "CameraName": "CM9-XX-3-C1",
+   "LiveStream": "rtsp://example.invalid/cam/903 extra",
+   "Lat": 13.75,
+   "Long": 100.55,
+   "camera_description": "ลิงก์มีช่องว่าง-CAM1"
+  },
+  {
+   "id": "904",
+   "CameraName": "CM9-XX-4-C1",
+   "LiveStream": "rtsp://example.invalid/cam/904",
+   "Lat": 18.79,
+   "Long": 98.98,
+   "camera_description": "นอกกรุงเทพฯ-CAM1"
+  },
+  {
+   "id": "905",
+   "CameraName": "CM9-XX-5-C1",
+   "LiveStream": "rtsp://example.invalid/cam/905",
+   "Lat": null,
+   "Long": "",
+   "camera_description": "ไม่มีพิกัด-CAM1"
+  },
+  {
+   "id": "101",
+   "CameraName": "CM1-WL-50-C1",
+   "LiveStream": "rtsp://example.invalid/cam/101",
+   "Lat": 13.7634,
+   "Long": 100.624,
+   "camera_description": "แถวซ้ำ-CAM1"
+  },
+  "not-an-object"
+ ]
+}

@@ -3,15 +3,33 @@ import { rainClassTh } from '@/lib/engine/status'
 import { formatShortBkk } from '@/lib/time'
 import type { MapStation } from '@/lib/ui/api'
 import { ageTh, freeboardTh } from '@/lib/ui/format'
+import { viewAtStationTh } from '@/lib/ui/cctv'
 import { KIND_LABEL_TH, sourceLabel } from '@/lib/ui/levels'
+import { IconCamera } from '../cctv/CameraGlyph'
 import { LevelBadge } from '../LevelBadge'
 
 function num(v: number | null | undefined, d = 2): string | null {
   return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(d) : null
 }
 
-/** Thai details for one station (map popup and list). Text only; safe from injected markup. */
-export function StationPopup({ s, nowMs, homeKm }: { s: MapStation; nowMs: number; homeKm?: number | null }) {
+/**
+ * Thai details for one station (map popup and list). Text only; safe from injected markup.
+ * `cameraCount` > 0 (cameras joined to this station, known once the camera layer has loaded)
+ * adds "ดูกล้องที่จุดนี้ (N มุม)".
+ */
+export function StationPopup({
+  s,
+  nowMs,
+  homeKm,
+  cameraCount = 0,
+  onViewCameras,
+}: {
+  s: MapStation
+  nowMs: number
+  homeKm?: number | null
+  cameraCount?: number
+  onViewCameras?: () => void
+}) {
   const rows: [string, string][] = []
   if (s.kind === 'canal' || s.kind === 'river') {
     const wl = num(s.waterLevel)
@@ -53,6 +71,11 @@ export function StationPopup({ s, nowMs, homeKm }: { s: MapStation; nowMs: numbe
         {s.observedAt ? `อัปเดต ${ageTh(s.observedAt, nowMs)} (${formatShortBkk(s.observedAt)} น.)` : 'ยังไม่มีข้อมูล'}
       </div>
       <div className="text-xs text-muted">ที่มา: {sourceLabel(s.source)}</div>
+      {cameraCount > 0 && onViewCameras && (
+        <button type="button" className="fm-btn fm-btn-quiet mt-2" onClick={onViewCameras}>
+          <IconCamera size={16} /> {viewAtStationTh(cameraCount)}
+        </button>
+      )}
     </div>
   )
 }

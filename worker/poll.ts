@@ -3,17 +3,30 @@
 //   npm run worker                      loop every POLL_MINUTES: fetch → store → alerts → prune
 //   npm run worker:once                 one cycle, then exit (exit 1 when every source failed)
 //   npm run worker -- --relay <baseUrl> fetch only the Thai-IP-only sources and POST them to
-//                                       <baseUrl>/api/ingest (Bearer INGEST_TOKEN); no local store
+//                                       <baseUrl>/api/ingest (Bearer INGEST_TOKEN); no local store.
+//                                       CCTV camera lists (CCTV_SOURCES) are pushed when due,
+//                                       public fields only (stream addresses stay here)
 //   (--once combines with --relay)
 //
 // Reads .env from the working directory when present (real env vars win).
 
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { loadConfig } from '../src/lib/config'
 import { getSenders, logChannelConfigWarnings } from '../src/lib/notify'
 import { log } from '../src/lib/server/log'
-import { pollIntervalMs, runPollCycle, runRelayCycle, startLoop, summarize, type LoopHandle } from '../src/lib/server/poller'
+import {
+  parseRelayCameraState,
+  pollIntervalMs,
+  runPollCycle,
+  runRelayCycle,
+  serializeRelayCameraState,
+  startLoop,
+  summarize,
+  type LoopHandle,
+} from '../src/lib/server/poller'
 import { getSources } from '../src/lib/sources'
+import { getCameraSources, RELAYABLE_CAMERA_SOURCES } from '../src/lib/sources/cameras'
 import { getStore } from '../src/lib/store'
 
 interface Args {
@@ -68,9 +81,41 @@ async function main(): Promise<void> {
       console.error('relay mode: no Thai-IP-only source is enabled (check SOURCES / DATA_MODE)')
       process.exit(2)
     }
-    log(`[relay] relaying ${sources.map((s) => s.id).join(', ')} → ${base.origin}/api/ingest every ${intervalMs / 60_000} min`)
+    const cameraSources = getCameraSources(config).filter((a) => RELAYABLE_CAMERA_SOURCES.includes(a.id))
+    // When each camera list was last fetched (no lists, no refs), kept across --once runs.
+    const cameraStateFile = join(config.DATA_DIR, 'relay-camera-schedule.json')
+    let savedSchedule: string | null = null
+    try {
+      savedSchedule = readFileSync(cameraStateFile, 'utf8')
+    } catch {
+      // first run, or unreadable: start with an empty schedule
+    }
+    const cameraState = parseRelayCameraState(savedSchedule)
+    let stateWriteWarned = false
+    log(
+      `[relay] relaying ${sources.map((s) => s.id).join(', ')} → ${base.origin}/api/ingest every ${intervalMs / 60_000} min` +
+        (cameraSources.length ? `; camera lists: ${cameraSources.map((a) => a.id).join(', ')}` : ''),
+    )
     cycle = async () => {
-      const s = await runRelayCycle({ baseUrl: base.toString(), token: config.INGEST_TOKEN!, config, sources, fetch: fetchImpl, log })
+      const s = await runRelayCycle({
+        baseUrl: base.toString(),
+        token: config.INGEST_TOKEN!,
+        config,
+        sources,
+        fetch: fetchImpl,
+        log,
+        cameraSources,
+        cameraState,
+      })
+      if (cameraSources.length) {
+        try {
+          mkdirSync(config.DATA_DIR, { recursive: true })
+          writeFileSync(cameraStateFile, serializeRelayCameraState(cameraState))
+        } catch (err) {
+          if (!stateWriteWarned) log(`[relay] cannot save ${cameraStateFile}: ${err instanceof Error ? err.message : String(err)}`)
+          stateWriteWarned = true
+        }
+      }
       return s.allFailed
     }
   } else {
@@ -79,11 +124,12 @@ async function main(): Promise<void> {
     const deps = { store, config, sources, senders: getSenders(), fetch: fetchImpl, log }
     log(
       `[worker] sources: ${sources.map((s) => s.id).join(', ') || '(none)'}; store=${config.STORE}; ` +
-        `alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}; data=${config.DATA_MODE}; every ${intervalMs / 60_000} min`,
+        `alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}; data=${config.DATA_MODE}; ` +
+        `cameras=${config.enabledCameraSources.join(',') || 'off'}; every ${intervalMs / 60_000} min`,
     )
     if (config.RUN_ALERTS === '1') logChannelConfigWarnings(config, log)
     cycle = async (signal) => {
-      const s = await runPollCycle(deps, { signal })
+      const s = await runPollCycle(deps, { signal, cameras: true })
       log(summarize(s))
       return s.allFailed
     }

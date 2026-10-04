@@ -1,4 +1,5 @@
-import { getConfig } from '@/lib/config'
+import { recordCameraCatalogFailure, saveCameraCatalog } from '@/lib/cameras/catalog'
+import { getConfig, type AppConfig } from '@/lib/config'
 import { META_LAST_INGEST, runAlerts, storeSourceResult } from '@/lib/pipeline'
 import { hasBearerSecret } from '@/lib/server/auth'
 import { runAfterResponse } from '@/lib/server/background'
@@ -6,7 +7,8 @@ import { serverDeps } from '@/lib/server/context'
 import { handler, json, jsonError, readJson } from '@/lib/server/http'
 import { log } from '@/lib/server/log'
 import { pruneOldReadings } from '@/lib/server/poller'
-import { IngestPayloadSchema } from '@/lib/server/validation'
+import { IngestPayloadSchema, parseRelayCameraCatalog, RelayCameraFailureSchema, type IngestPayload } from '@/lib/server/validation'
+import type { Store } from '@/lib/store/types'
 import type { SourceFetchResult } from '@/lib/types'
 
 export const runtime = 'nodejs'
@@ -16,8 +18,49 @@ export const maxDuration = 300
 
 const MAX_BODY = 25 * 1024 * 1024
 
+interface CameraIngestReport {
+  source: string | null
+  saved: boolean
+  count: number
+  warning: string | null
+}
+
 /**
- * POST /api/ingest (Authorization: Bearer INGEST_TOKEN) body { results, failures? } → { inserted }
+ * Store the camera lists a relay pushed (public fields only; this server holds no refs for
+ * them, so they are link-only here). Never throws: camera lists must not block readings.
+ */
+async function ingestCameraCatalogs(store: Store, config: AppConfig, payload: IngestPayload): Promise<CameraIngestReport[]> {
+  const out: CameraIngestReport[] = []
+  for (const raw of payload.cameraCatalogs) {
+    try {
+      const parsed = parseRelayCameraCatalog(raw)
+      if (!parsed.ok) {
+        out.push({ source: parsed.source, saved: false, count: 0, warning: parsed.error })
+        continue
+      }
+      const { catalog, dropped } = parsed
+      if (!config.enabledCameraSources.includes(catalog.source)) {
+        out.push({ source: catalog.source, saved: false, count: 0, warning: 'camera source not enabled on this server (CCTV_SOURCES)' })
+        continue
+      }
+      const res = await saveCameraCatalog(store, catalog)
+      const note = dropped > 0 ? `dropped ${dropped} invalid camera(s)` : null
+      out.push({ source: catalog.source, saved: res.saved, count: catalog.cameras.length, warning: [res.warning, note].filter(Boolean).join('; ') || null })
+    } catch (err) {
+      out.push({ source: null, saved: false, count: 0, warning: `store failed: ${err instanceof Error ? err.message : String(err)}` })
+    }
+  }
+  for (const raw of payload.cameraFailures) {
+    const f = RelayCameraFailureSchema.safeParse(raw)
+    if (!f.success || !config.enabledCameraSources.includes(f.data.source)) continue
+    await recordCameraCatalogFailure(store, f.data.source, f.data.error).catch(() => undefined)
+  }
+  return out
+}
+
+/**
+ * POST /api/ingest (Authorization: Bearer INGEST_TOKEN) body { results, failures?, cameraCatalogs?,
+ * cameraFailures? } → { inserted, cameras }
  * Used by `npm run worker -- --relay <url>` on a machine in Thailand. The relay gets its
  * answer as soon as the readings are stored; alert evaluation and delivery (which can
  * take a while with many channels) run after the response so the relay never times out
@@ -71,7 +114,12 @@ export const POST = handler('ingest', async (req: Request) => {
     })
   }
   if (payload.results.length > 0) await store.setMeta(META_LAST_INGEST, now)
-  log(`[ingest] relay: ${payload.results.length} result(s), ${payload.failures.length} failure(s), ${inserted} new readings`)
+  // After the stations above, so the camera ↔ station join sees them.
+  const cameras = await ingestCameraCatalogs(store, config, payload)
+  log(
+    `[ingest] relay: ${payload.results.length} result(s), ${payload.failures.length} failure(s), ${inserted} new readings` +
+      (cameras.length ? `; camera lists: ${cameras.map((c) => `${c.source ?? '?'} ${c.saved ? c.count : 'kept previous'}`).join(', ')}` : ''),
+  )
 
   const runAlertsNow = config.RUN_ALERTS === '1' && payload.results.length > 0
   runAfterResponse('ingest', async () => {
@@ -86,5 +134,5 @@ export const POST = handler('ingest', async (req: Request) => {
       if (pruned > 0) log(`[ingest] pruned ${pruned} reading(s) older than ${config.HISTORY_HOURS} h`)
     }
   })
-  return json({ ok: true, inserted, sources: perSource, alerts: runAlertsNow ? 'scheduled' : null })
+  return json({ ok: true, inserted, sources: perSource, cameras, alerts: runAlertsNow ? 'scheduled' : null })
 })

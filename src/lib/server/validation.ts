@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { isInThailand } from '../geo'
-import type { SourceId } from '../types'
+import type { CameraCatalog, CameraSourceId, SourceId } from '../types'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN } from '../types'
 
 // Request schemas. Messages are Thai because the UI shows `{ error }` verbatim.
@@ -168,9 +168,92 @@ export const IngestPayloadSchema = z.object({
     .array(z.object({ source: z.enum(SOURCE_IDS), error: z.string().max(1000), attemptedAt: isoTime.optional() }))
     .max(20)
     .default([]),
+  /**
+   * CCTV camera lists fetched by the relay (public fields only, never upstream refs). Each entry
+   * is validated on its own with RelayCameraCatalogSchema: a bad camera list is skipped and
+   * never blocks the readings.
+   */
+  cameraCatalogs: z.array(z.unknown()).max(5).default([]),
+  /** Camera lists the relay could not fetch (validated per entry, like cameraCatalogs). */
+  cameraFailures: z.array(z.unknown()).max(5).default([]),
 })
 
 export type IngestPayload = z.infer<typeof IngestPayloadSchema>
+
+// --- relayed camera catalogues ------------------------------------------------------
+
+// Simulated demo cameras are never relayed.
+const RELAY_CAMERA_SOURCE_SET: Record<Exclude<CameraSourceId, 'demo-cam'>, true> = {
+  'bma-floodcam': true,
+  'dwr-cctv': true,
+}
+const RELAY_CAMERA_SOURCES = Object.keys(RELAY_CAMERA_SOURCE_SET) as [CameraSourceId, ...CameraSourceId[]]
+
+/** Most cameras accepted in one relayed list (BMA has ~900). */
+export const MAX_RELAY_CAMERAS = 5000
+
+const noControl = (s: string) => !/[\u0000-\u001f\u007f]/.test(s)
+const camText = (max: number) => z.string().max(max).refine(noControl, { error: 'control characters' })
+
+/**
+ * One relayed camera. Unknown keys are stripped (so an upstream ref sent by mistake is never
+ * stored); nearStationIds is recomputed by the receiver; officialUrl is re-checked against the
+ * agency's host when saved.
+ */
+export const RelayCameraSchema = z
+  .object({
+    id: z.string().max(100),
+    source: z.enum(RELAY_CAMERA_SOURCES),
+    nativeId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    siteId: z.string().min(1).max(100),
+    name: camText(300).pipe(z.string().trim().min(1)),
+    code: camText(100).nullable().default(null),
+    angle: camText(40).nullable().default(null),
+    owner: camText(200).pipe(z.string().trim().min(1)),
+    lat: z.number().finite(),
+    lng: z.number().finite(),
+    facing: z.enum(['water', 'road', 'unknown']).default('unknown'),
+    nearStationIds: z.array(z.string().max(200)).max(50).default([]),
+    officialUrl: z.string().max(500),
+    cadenceMin: z.number().finite().min(0).max(1440).nullable().default(null),
+  })
+  .refine((c) => c.id === `${c.source}:${c.nativeId}`, { error: 'camera id must be <source>:<nativeId>' })
+  .refine((c) => isInThailand(c.lat, c.lng), { error: 'camera outside Thailand' })
+
+export const RelayCameraCatalogSchema = z.object({
+  source: z.enum(RELAY_CAMERA_SOURCES),
+  fetchedAt: isoTime,
+  cameras: z.array(z.unknown()).min(1).max(MAX_RELAY_CAMERAS),
+})
+
+export const RelayCameraFailureSchema = z.object({
+  source: z.enum(RELAY_CAMERA_SOURCES),
+  error: z.string().max(1000),
+  attemptedAt: isoTime.optional(),
+})
+
+/**
+ * Validate one relayed camera list: the envelope must be valid, invalid cameras are dropped
+ * (counted), and cameras of another source are rejected. Never returns refs.
+ */
+export function parseRelayCameraCatalog(
+  raw: unknown,
+): { ok: true; catalog: CameraCatalog; dropped: number } | { ok: false; source: string | null; error: string } {
+  const env = RelayCameraCatalogSchema.safeParse(raw)
+  if (!env.success) {
+    const source = (raw as { source?: unknown } | null)?.source
+    return { ok: false, source: typeof source === 'string' ? source.slice(0, 40) : null, error: 'invalid camera list' }
+  }
+  const cameras: CameraCatalog['cameras'] = []
+  let dropped = 0
+  for (const c of env.data.cameras) {
+    const parsed = RelayCameraSchema.safeParse(c)
+    if (parsed.success && parsed.data.source === env.data.source) cameras.push(parsed.data)
+    else dropped++
+  }
+  if (cameras.length === 0) return { ok: false, source: env.data.source, error: 'no valid camera in the list' }
+  return { ok: true, catalog: { source: env.data.source, fetchedAt: env.data.fetchedAt, cameras }, dropped }
+}
 
 // --- query helpers ---------------------------------------------------------------
 

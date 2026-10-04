@@ -9,6 +9,7 @@ import { useEffect } from 'react'
 import { TileLayer, useMap } from 'react-leaflet'
 import type { Level } from '@/lib/types'
 import { levelShapeSvg } from '@/components/LevelBadge'
+import { cameraMarkerSvg } from '@/components/cctv/CameraGlyph'
 
 export const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
 
@@ -67,6 +68,25 @@ export function levelIcon(level: Level, size = 14): L.DivIcon {
     iconCache.set(key, icon)
   }
   return icon
+}
+
+let camIcon: L.DivIcon | null = null
+
+/**
+ * Camera site marker: neutral badge drawn up and to the right of its point, so the road-flood
+ * sensor it usually shares a pole with stays visible underneath.
+ */
+export function cameraIcon(): L.DivIcon {
+  if (!camIcon) {
+    camIcon = L.divIcon({
+      className: 'fm-cam-icon',
+      html: cameraMarkerSvg(22),
+      iconSize: [22, 22],
+      iconAnchor: [-3, 25],
+      popupAnchor: [14, -25],
+    })
+  }
+  return camIcon
 }
 
 let homeIcon: L.DivIcon | null = null

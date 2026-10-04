@@ -1,0 +1,140 @@
+{
+ "_fixture_note": "SYNTHESIZED DWR reportCctv/listPaginate body (shape per SIAHRA build-dwr-cctv, 2026-09-26). Station codes/names are public; entity ids are invented; cctvSnapshotLink/cctvVideoLink are FAKE credential links (dyndns.invalid) that the parser must drop.",
+ "status": "OK",
+ "value": {
+  "totalCount": 8,
+  "results": [
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000220",
+     "stationCode": "TA100220",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": " สะพานพระพุทธยอดฟ้า ",
+     "stnNameEn": "Phra Phuttha Yot Fa Bridge",
+     "cctvSnapshotLink": "http://user:pass@cam220.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam220.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "ธนบุรี",
+    "subDistrictNameTh": "ตำบล (จำลอง)",
+    "provinceNameTh": "กรุงเทพมหานคร"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000221",
+     "stationCode": "TA100221",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": "ศาลากลางสมุทรปราการ",
+     "stnNameEn": "Samut Prakan City Hall",
+     "cctvSnapshotLink": "http://user:pass@cam221.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam221.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "เมืองสมุทรปราการ",
+    "subDistrictNameTh": "ตำบล (จำลอง)",
+    "provinceNameTh": "จ.สมุทรปราการ"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000224",
+     "stationCode": "TC100224",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": "สะพานปทุมธานี 2",
+     "stnNameEn": "Pathum Thani Bridge 2",
+     "cctvSnapshotLink": "http://user:pass@cam224.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam224.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "เมืองปทุมธานี",
+    "subDistrictNameTh": "ตำบล (จำลอง)",
+    "provinceNameTh": "ปทุมธานี"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000218",
+     "stationCode": "TA100218",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": "บ้านป้อม",
+     "stnNameEn": "Ban Pom",
+     "cctvSnapshotLink": "http://user:pass@cam218.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam218.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "พระนครศรีอยุธยา",
+    "subDistrictNameTh": "ตำบล (จำลอง)",
+    "provinceNameTh": "พระนครศรีอยุธยา"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000202",
+     "stationCode": "TA130202",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": "แม่น้ำท่าจีนที่ท่าฉลอม",
+     "stnNameEn": "Tha Chin River at Tha Chalom",
+     "cctvSnapshotLink": "http://user:pass@cam202.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam202.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "เมืองสมุทรสาคร",
+    "subDistrictNameTh": "ตำบล (จำลอง)",
+    "provinceNameTh": "สมุทรสาคร"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000106",
+     "stationCode": "TC020106",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": "สถานีภาคเหนือ (จำลอง)",
+     "stnNameEn": "Northern station",
+     "cctvSnapshotLink": "http://user:pass@cam106.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam106.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "เมืองเชียงใหม่",
+    "subDistrictNameTh": "ตำบล (จำลอง)",
+    "provinceNameTh": "เชียงใหม่"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000219",
+     "stationCode": "TA100219",
+     "subBasinId": "sb-fixture",
+     "stnNameTh": "สะพานปทุมธานี 1",
+     "stnNameEn": "Pathum Thani Bridge 1",
+     "cctvSnapshotLink": "http://user:pass@cam219.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+     "cctvVideoLink": "rtsp://admin:secret@cam219.dyndns.invalid:554/stream",
+     "cctvOnline": true,
+     "teamg_group_code": "g",
+     "projectName": "p",
+     "label": "l"
+    },
+    "districtNameTh": "เมืองปทุมธานี",
+    "subDistrictNameTh": "ตำบล (จำลอง)"
+   },
+   {
+    "entity": {
+     "id": "00000000-0000-4000-8000-000000000999",
+     "cctvSnapshotLink": "http://user:pass@cam999.dyndns.invalid:8080/cgi-bin/snapshot.cgi"
+    }
+   }
+  ]
+ }
+}

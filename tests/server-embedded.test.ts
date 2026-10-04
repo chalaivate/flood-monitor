@@ -27,6 +27,8 @@ const saved = { ...process.env }
 beforeAll(() => {
   process.env.POLL_MINUTES = '60'
   process.env.STORE = 'sqlite'
+  // The worker refreshes camera catalogues: keep this test off the network.
+  process.env.CCTV_SOURCES = 'none'
   resetConfigCache()
 })
 

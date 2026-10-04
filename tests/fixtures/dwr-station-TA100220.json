@@ -1,0 +1,19 @@
+{
+ "_fixture_note": "SYNTHESIZED DWR station/getByCode body; credential links are fake.",
+ "status": "OK",
+ "value": {
+  "fullCon": {
+   "entity": {
+    "id": "st-fixture-220",
+    "stationCode": "TA100220",
+    "point": {
+     "lat": 13.738694,
+     "lon": 100.49633
+    },
+    "cctvSnapshotLink": "http://user:pass@cam220.dyndns.invalid:8080/cgi-bin/snapshot.cgi",
+    "cctvLatestSnapshotPath": "/TA100220/2026/10/4/10_15.jpg",
+    "cctvVideoLink": "rtsp://admin:secret@cam220.dyndns.invalid:554/stream"
+   }
+  }
+ }
+}

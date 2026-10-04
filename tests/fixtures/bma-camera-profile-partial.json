@@ -1,0 +1,29 @@
+{
+ "_fixture_note": "SYNTHESIZED partial camera_profile (3 rows) for the < 50% guard. Fake example.invalid streams.",
+ "data": [
+  {
+   "id": "101",
+   "CameraName": "CM1-WL-50-C1",
+   "LiveStream": "rtsp://example.invalid/cam/101",
+   "Lat": 13.7634,
+   "Long": 100.624,
+   "camera_description": "1. สะพานข้ามคลองแสนแสบ ซอยลาดพร้าว 122 (มหาดไทย)-CAM1"
+  },
+  {
+   "id": "301",
+   "CameraName": "CM1-JJ-8-C1",
+   "LiveStream": "rtsp://example.invalid/cam/301",
+   "Lat": 13.84029,
+   "Long": 100.54611,
+   "camera_description": "ปากซอยเทศบาลรังรักษ์เหนือฝั่งประชานิเวศน์ 1-CAM1"
+  },
+  {
+   "id": "601",
+   "CameraName": "CCTV บางเขนใหม่",
+   "LiveStream": "rtsp://example.invalid/cam/601",
+   "Lat": 13.8712,
+   "Long": 100.60095,
+   "camera_description": ""
+  }
+ ]
+}

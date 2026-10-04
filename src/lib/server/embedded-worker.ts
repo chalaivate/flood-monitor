@@ -49,11 +49,12 @@ async function startOnce(): Promise<LoopHandle> {
   const intervalMs = pollIntervalMs(config.POLL_MINUTES, log)
   log(
     `[embedded-worker] polling ${sources.map((s) => s.id).join(', ') || '(no sources)'} every ${intervalMs / 60_000} min` +
-      ` (store=${config.STORE}, alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}, data=${config.DATA_MODE})`,
+      ` (store=${config.STORE}, alerts=${config.RUN_ALERTS === '1' ? 'on' : 'off'}, data=${config.DATA_MODE},` +
+      ` cameras=${config.enabledCameraSources.join(',') || 'off'})`,
   )
   return startLoop(
     async (signal) => {
-      log(summarize(await runPollCycle(deps, { signal })))
+      log(summarize(await runPollCycle(deps, { signal, cameras: true })))
     },
     { intervalMs, log },
   )

@@ -61,6 +61,14 @@ export const LIMITS = {
    * so they can never starve saved places.
    */
   weatherAdHoc: { capacity: 200, windowMs: HOUR },
+  /**
+   * GET /api/cctv/image per client IP, cache hits included (a viewer refreshes about once a
+   * minute, dashboard tiles every 3 minutes). Upstream frames have their own per-source
+   * concurrency and hourly budgets in cctv-proxy.ts.
+   */
+  cctvImage: { capacity: 60, windowMs: MIN },
+  /** GET /api/cctv/cameras per client IP. */
+  cctvCameras: { capacity: 30, windowMs: MIN },
 } satisfies Record<string, LimitRule>
 
 const MAX_KEYS = 10_000

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
+import { connection } from 'next/server'
 import type { ReactNode } from 'react'
+import { getConfig } from '@/lib/config'
 import { ROAD_FLOOD_CM } from '@/lib/engine/status'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN } from '@/lib/types'
 import { LevelBadge } from '@/components/LevelBadge'
@@ -171,7 +173,115 @@ function FreeboardDiagram() {
   )
 }
 
-export default function AboutPage() {
+const CAMERA_SOURCES: { name: string; owner: string; url: string; host: string }[] = [
+  {
+    name: 'กล้องเฝ้าระวังน้ำท่วม',
+    owner: 'ระบบตรวจวัดน้ำท่วมถนน สำนักการระบายน้ำ กรุงเทพมหานคร',
+    url: 'https://floodbangkok.bangkok.go.th/',
+    host: 'floodbangkok.bangkok.go.th',
+  },
+  { name: 'กล้องสถานีโทรมาตรแม่น้ำ', owner: 'กรมทรัพยากรน้ำ', url: 'https://telemetry.dwr.go.th/reportCctv', host: 'telemetry.dwr.go.th' },
+]
+
+const CAMERA_LINKS: { name: string; url: string; host: string }[] = [
+  { name: 'กล้องระดับน้ำ สำนักการระบายน้ำ', url: 'https://dds.bangkok.go.th/cctv.php', host: 'dds.bangkok.go.th/cctv.php' },
+  { name: 'กล้องจราจร กทม.', url: 'http://www.bmatraffic.com/', host: 'bmatraffic.com' },
+  { name: 'CCTV ลุ่มน้ำเจ้าพระยา กรมชลประทาน', url: 'https://wmsc.rid.go.th/cctv2/', host: 'wmsc.rid.go.th/cctv2' },
+  { name: 'กล้องทางหลวง กรมทางหลวง', url: 'https://www.highwaytraffic.go.th/', host: 'highwaytraffic.go.th' },
+]
+
+function ExtLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" className="text-text underline decoration-border underline-offset-4 hover:decoration-current">
+      {children}
+    </a>
+  )
+}
+
+/** "ภาพจากกล้อง CCTV": sources, display conditions, privacy and the takedown contact. */
+function CameraSection({ demo, contactEmail }: { demo: boolean; contactEmail: string | null }) {
+  return (
+    <Section id="cctv" title="ภาพจากกล้อง CCTV">
+      <p>แอปนี้แสดงภาพนิ่งจากกล้องของหน่วยงานรัฐ เพื่อช่วยดูสภาพน้ำบนถนนและในแม่น้ำใกล้บ้าน ประกอบกับข้อมูลระดับน้ำ</p>
+      {demo && (
+        <p className="rounded-xl border border-border bg-card-2 px-3 py-2 text-sm text-text">
+          โหมดสาธิต: ภาพกล้องทั้งหมดเป็นภาพจำลองที่ระบบสร้างขึ้น ไม่ใช่ภาพจากกล้องจริง
+        </p>
+      )}
+      <ul className="list-disc space-y-1 pl-5">
+        {CAMERA_SOURCES.map((c) => (
+          <li key={c.host}>
+            <span className="font-medium text-text">{c.name}:</span> {c.owner} (<ExtLink href={c.url}>{c.host}</ExtLink>)
+          </li>
+        ))}
+        <li>
+          <span className="font-medium text-text">ลิงก์ไปยังเว็บของหน่วยงาน:</span>{' '}
+          {CAMERA_LINKS.map((l, i) => (
+            <span key={l.host}>
+              {i > 0 && ' · '}
+              {l.name} (<ExtLink href={l.url}>{l.host}</ExtLink>)
+            </span>
+          ))}
+        </li>
+      </ul>
+      <h3 className="mt-1 font-medium text-text">เงื่อนไขการแสดงภาพ</h3>
+      <ul className="list-disc space-y-1 pl-5">
+        <li>
+          ภาพเป็นลิขสิทธิ์และอยู่ในความรับผิดชอบของหน่วยงานเจ้าของกล้อง หน่วยงานเหล่านี้ไม่ได้รับรองหรือเกี่ยวข้องกับโครงการนี้
+          (สถานะ: หน่วยงานยังไม่ได้เผยแพร่เงื่อนไขการใช้ภาพ)
+        </li>
+        <li>
+          ภาพเป็นภาพนิ่งที่ดึงเป็นระยะ ไม่ใช่ภาพสด เวลาที่แสดงคือเวลาที่ระบบได้รับภาพ เว้นแต่ระบุว่า “ถ่าย”
+          ซึ่งเป็นเวลาที่หน่วยงานบันทึก
+        </li>
+        <li>
+          ระบบเก็บภาพล่าสุดของแต่ละกล้องไว้ในหน่วยความจำชั่วคราวไม่เกิน 15 นาที (กล้องกรมทรัพยากรน้ำไม่เกิน 1 ชั่วโมง) เพื่อลดภาระเซิร์ฟเวอร์ของหน่วยงาน
+          ไม่บันทึกลงดิสก์หรือฐานข้อมูล ไม่มีภาพย้อนหลัง ไม่ขยายภาพ และไม่ใช้ระบบจดจำใบหน้าหรือป้ายทะเบียนรถ
+        </li>
+        <li>ระบบไม่บันทึกว่าผู้ใช้คนใดเปิดดูกล้องใด</li>
+        <li>ภาพใช้ประกอบการดูสถานการณ์เท่านั้น สถานะและการแจ้งเตือนคำนวณจากระยะห่างตลิ่งของสถานีวัดระดับน้ำ ไม่ได้มาจากภาพกล้อง</li>
+        <li>
+          กล้องที่ติดต่อไม่ได้ ภาพค้าง หรือภาพเก่า <strong className="font-medium text-text">ไม่ได้แปลว่าไม่มีน้ำท่วม</strong>
+        </li>
+        <li>บางเซิร์ฟเวอร์แสดงได้เฉพาะลิงก์ไปยังเว็บของหน่วยงาน เพราะกล้องบางแหล่งเปิดให้เข้าถึงจากเครือข่ายในประเทศไทยเท่านั้น</li>
+        <li>
+          หากพบภาพที่กระทบความเป็นส่วนตัว หรือหน่วยงานเจ้าของกล้องต้องการให้หยุดแสดงภาพ ติดต่อ{' '}
+          {contactEmail ? (
+            <a href={`mailto:${contactEmail}`} className="text-text underline underline-offset-4">
+              {contactEmail}
+            </a>
+          ) : (
+            'ผู้ดูแลเว็บไซต์นี้'
+          )}{' '}
+          — เราจะปิดการแสดงภาพจากแหล่งนั้นทันที
+        </li>
+      </ul>
+      <p className="text-sm">
+        ระบบนี้ไม่ใช่ประกาศเตือนภัยทางการ — ติดตามประกาศ กทม. สายด่วน{' '}
+        <a href="tel:1555" className="text-text underline underline-offset-4">
+          1555
+        </a>{' '}
+        และ ปภ.{' '}
+        <a href="tel:1784" className="text-text underline underline-offset-4">
+          1784
+        </a>
+      </p>
+    </Section>
+  )
+}
+
+/** Plain address only (it is rendered into a mailto: link). */
+function contactEmailOf(v: string | undefined): string | null {
+  const s = v?.trim()
+  return s && /^[^\s@<>()"',;:]+@[^\s@<>()"',;:]+\.[^\s@<>()"',;:]+$/.test(s) ? s : null
+}
+
+export default async function AboutPage() {
+  // Rendered per request: the camera section and the contact address come from the server's
+  // runtime settings, not from the build.
+  await connection()
+  const cfg = getConfig()
+  const cameraSources = cfg.enabledCameraSources
   const fb = DEFAULT_FREEBOARD
   const rain = DEFAULT_RAIN
   const road = ROAD_FLOOD_CM
@@ -327,6 +437,8 @@ export default function AboutPage() {
         </ul>
       </Section>
 
+      {cameraSources.length > 0 && <CameraSection demo={cameraSources.includes('demo-cam')} contactEmail={contactEmailOf(cfg.CONTACT_EMAIL)} />}
+
       <Section id="privacy" title="ความเป็นส่วนตัว">
         <ul className="list-disc space-y-1 pl-5">
           <li>ตำแหน่งบ้านที่ตั้งบนแดชบอร์ดถูกเก็บในเบราว์เซอร์ของคุณเท่านั้น ไม่ถูกบันทึกบนเซิร์ฟเวอร์</li>
@@ -335,6 +447,9 @@ export default function AboutPage() {
             และส่งเฉพาะพิกัดโดยประมาณต่อให้ Open-Meteo เพื่อขอข้อมูลอากาศ
           </li>
           <li>แผนที่และเรดาร์โหลดภาพโดยตรงจาก OpenStreetMap และ RainViewer ซึ่งจะเห็นพื้นที่แผนที่ที่คุณเปิดดู</li>
+          {cameraSources.length > 0 && (
+            <li>ภาพกล้องที่แสดงในแอปโหลดผ่านเซิร์ฟเวอร์นี้ หน่วยงานเจ้าของกล้องจึงไม่เห็นตำแหน่งหรือที่อยู่ IP ของคุณ ส่วนลิงก์ “เปิดเว็บทางการ” จะเปิดเว็บของหน่วยงานโดยตรง แต่ไม่ส่งที่อยู่หน้านี้ (ซึ่งอาจมีพิกัดบ้าน) ไปด้วย</li>
+          )}
           <li>หากตั้งค่าการแจ้งเตือน ระบบจะเก็บชื่อสถานที่ พิกัด เกณฑ์ และช่องทางแจ้งเตือนไว้บนเซิร์ฟเวอร์เพื่อใช้ส่งข้อความ ลบได้ทุกเมื่อที่หน้าแจ้งเตือน</li>
           <li>ลิงก์ “คัดลอกลิงก์” บนแดชบอร์ดมีพิกัดของตำแหน่งนั้น โปรดแชร์เฉพาะกับผู้ที่ไว้ใจ</li>
           <li>ระบบไม่ใช้คุกกี้ติดตามหรือโฆษณา</li>

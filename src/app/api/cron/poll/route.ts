@@ -27,7 +27,7 @@ const run = handler('cron/poll', async (req: Request) => {
   if (g.__floodCronRunning) return jsonError(409, 'กำลังดึงข้อมูลรอบก่อนหน้าอยู่ กรุณารอสักครู่')
   g.__floodCronRunning = true
   try {
-    const summary = await runPollCycle(await serverDeps())
+    const summary = await runPollCycle(await serverDeps(), { cameras: true })
     log(`[cron] ${summarize(summary)}`)
     return json({ ok: !summary.allFailed, ...summary })
   } finally {

@@ -1,4 +1,4 @@
-import type { ChannelLink, MapStation, PublicChannel, PublicPlace } from '../server/public'
+import type { CameraLinkOut, CamerasResponse, ChannelLink, MapStation, PublicCamera, PublicChannel, PublicPlace } from '../server/public'
 import type { AlertEvent, ChannelType, HistoryPoint, Place } from '../types'
 
 // Client-side view of the HTTP API (docs/DESIGN.md §5). Response shapes come from
@@ -19,7 +19,7 @@ export interface PublicConfig {
   rainviewer: boolean
 }
 
-export type { ChannelLink, MapStation, PublicChannel, PublicPlace }
+export type { CameraLinkOut, CamerasResponse, ChannelLink, MapStation, PublicCamera, PublicChannel, PublicPlace }
 
 export interface StationsResponse {
   generatedAt: string
@@ -149,4 +149,38 @@ export const CHANNEL_LABEL_TH: Record<ChannelType, string> = {
   ntfy: 'ntfy',
   email: 'อีเมล',
   discord: 'Discord',
+}
+
+// --- CCTV ---------------------------------------------------------------------
+
+export interface CamerasQuery {
+  lat: number
+  lng: number
+  /** Radius km (server default 3, max 20). */
+  r?: number
+  /** Most sites (server default 4, max 24); every angle of a site is included. */
+  n?: number
+}
+
+/**
+ * GET /api/cctv/cameras: nearest sites around a point, or (no query) every camera for the map.
+ * Missing arrays are normalised so callers can rely on them.
+ */
+export async function fetchCameras(q: CamerasQuery | null = null, opts: Pick<ApiOptions, 'signal' | 'fetch'> = {}): Promise<CamerasResponse> {
+  const params = new URLSearchParams()
+  if (q) {
+    params.set('lat', String(q.lat))
+    params.set('lng', String(q.lng))
+    if (q.r !== undefined) params.set('r', String(q.r))
+    if (q.n !== undefined) params.set('n', String(q.n))
+  }
+  const qs = params.toString()
+  const r = await apiFetch<Partial<CamerasResponse> | null>(`/api/cctv/cameras${qs ? `?${qs}` : ''}`, opts)
+  return {
+    generatedAt: typeof r?.generatedAt === 'string' ? r.generatedAt : new Date().toISOString(),
+    catalogAt: r?.catalogAt && typeof r.catalogAt === 'object' ? r.catalogAt : {},
+    cameras: Array.isArray(r?.cameras) ? r.cameras : [],
+    nearestOutsideKm: typeof r?.nearestOutsideKm === 'number' ? r.nearestOutsideKm : null,
+    links: Array.isArray(r?.links) ? r.links : [],
+  }
 }
