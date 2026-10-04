@@ -4,6 +4,7 @@ import { getCameraRef, hasCameraRefs, isCameraSourceId, loadCameraCatalogs } fro
 import { haversineKm } from '../geo'
 import type { Store } from '../store/types'
 import type { Camera, CameraCatalog, CameraSourceId } from '../types'
+import { BROWSER_UA } from '../sources/http'
 import { publicOrigin } from './http'
 import { ImageCache, NotAttemptedError, type CachePolicy } from './image-cache'
 import { log, type Logger } from './log'
@@ -55,7 +56,8 @@ export const CCTV_POLICY: Record<UpstreamCameraSource, CctvSourcePolicy> = {
     ttlMs: 60_000,
     failTtlMs: 60_000,
     staleMaxMs: 15 * MIN,
-    timeoutMs: 20_000,
+    // BMA's proxy grabs a frame from the camera stream first (~9 s, slower when busy).
+    timeoutMs: 25_000,
     maxInFlight: 3,
     maxQueue: 20,
     queueWaitMs: 15_000,
@@ -115,9 +117,12 @@ export const CCTV_MSG = {
 
 // --- frames -------------------------------------------------------------------------------------
 
+export type CctvImageType = 'image/jpeg' | 'image/png' | 'image/webp'
+
 export interface CctvFrame {
-  /** JPEG bytes (trimmed after the last end-of-image marker). */
+  /** Image bytes (JPEG trimmed after the last end-of-image marker). */
   bytes: Uint8Array
+  type: CctvImageType
   /** When this server got the frame, epoch ms. */
   fetchedAt: number
   /** Capture time stated by the agency (DWR snapshot path), ISO UTC; null when unknown. */
@@ -277,6 +282,40 @@ export function validateJpeg(bytes: Uint8Array): { bytes: Uint8Array; width: num
   return { bytes: trimmed, width: size?.width ?? null, height: size?.height ?? null }
 }
 
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+/** Smaller pictures are placeholders ("no signal" tiles, 1×1 pixels), not camera frames. */
+const MIN_FRAME_PX = { width: 64, height: 48 }
+
+export function isPng(bytes: Uint8Array): boolean {
+  return bytes.length > 24 && PNG_MAGIC.every((b, i) => bytes[i] === b)
+}
+
+export function isWebp(bytes: Uint8Array): boolean {
+  const tag = (o: number) => String.fromCharCode(bytes[o]!, bytes[o + 1]!, bytes[o + 2]!, bytes[o + 3]!)
+  return bytes.length > 16 && tag(0) === 'RIFF' && tag(8) === 'WEBP'
+}
+
+/**
+ * Validate an upstream image body: a complete JPEG (trimmed after its end marker), or a PNG /
+ * WebP still. Markup pages are refusals; tiny pictures are placeholders (the camera's problem).
+ */
+export function validateImage(bytes: Uint8Array): { bytes: Uint8Array; type: CctvImageType; width: number | null; height: number | null } {
+  if (bytes.byteLength === 0) throw new FrameError('unreachable', 'empty body')
+  if (isJpeg(bytes)) return { ...validateJpeg(bytes), type: 'image/jpeg' }
+  if (isPng(bytes)) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const width = view.getUint32(16)
+    const height = view.getUint32(20)
+    if (width < MIN_FRAME_PX.width || height < MIN_FRAME_PX.height) throw new FrameError('no-image', 'placeholder image')
+    return { bytes, type: 'image/png', width, height }
+  }
+  if (isWebp(bytes)) {
+    if (bytes.byteLength < 1024) throw new FrameError('no-image', 'placeholder image')
+    return { bytes, type: 'image/webp', width: null, height: null }
+  }
+  throw new FrameError('unreachable', 'not an image', { host: looksLikeHtml(bytes) ? 'refused' : 'reached' })
+}
+
 const DWR_PATH_RE = /^\/[A-Za-z0-9_-]{1,32}(?:\/[A-Za-z0-9_.-]{1,64}){1,8}$/
 const DWR_TIME_RE = /^\/[A-Za-z0-9_-]+\/(\d{4})\/(\d{1,2})\/(\d{1,2})\/(\d{1,2})_(\d{1,2})\.jpe?g$/i
 
@@ -398,6 +437,10 @@ interface SourceState {
   offReason: 'host-unreachable' | 'agency-backoff' | null
   /** Agency backoffs since the last good frame (doubles the pause when no Retry-After is given). */
   backoffs: number
+  /** Why the latest upstream attempt failed (no camera id, no reference), for health and the log. */
+  lastFailure: { reason: string; at: number } | null
+  /** reason → last time it was logged (one line per reason per FAILURE_LOG_MS). */
+  failureLogged: Map<string, number>
 }
 
 /**
@@ -409,6 +452,9 @@ interface SourceState {
  * frames, the same count of 403 / HTML answers starts an agency backoff instead (BMA answers a
  * sporadic 403 even to Thai IPs, so one is not enough).
  */
+/** One log line per failure reason per source this often. */
+const FAILURE_LOG_MS = 30 * 60_000
+
 export const SOURCE_DOWN_AFTER = 3
 export const SOURCE_DOWN_MS = 30 * 60_000
 /** Agency backoff: Retry-After when given (clamped), else 10 → 20 → 40 → 60 min. */
@@ -461,6 +507,8 @@ function sourceState(source: UpstreamCameraSource): SourceState {
       offUntil: 0,
       offReason: null,
       backoffs: 0,
+      lastFailure: null,
+      failureLogged: new Map(),
     }
     state.sources.set(source, s)
   }
@@ -510,6 +558,8 @@ export interface CctvSourceStats {
   queued: number
   /** Size of the most recent frame (helps decide whether downscaling is needed). */
   lastFrame: { width: number | null; height: number | null; bytes: number } | null
+  /** Why the latest upstream attempt failed, e.g. "HTTP 403" or "not an image" (no camera id). */
+  lastFailure: { reason: string; at: string } | null
 }
 
 /** Aggregate per-source counters (no camera ids, no clients). */
@@ -529,6 +579,7 @@ export function cctvImageStats(source: UpstreamCameraSource, now: number = Date.
     inFlight: s.gate.active,
     queued: s.gate.queued,
     lastFrame: s.lastFrame,
+    lastFailure: s.lastFailure ? { reason: s.lastFailure.reason, at: new Date(s.lastFailure.at).toISOString() } : null,
   }
 }
 
@@ -553,16 +604,37 @@ export interface CctvFetchDeps {
   policy?: Partial<CctvSourcePolicy>
 }
 
+/**
+ * Browser-style User-Agent that still names this system (the same one every BMA request uses):
+ * agency WAFs refuse bare tool user agents, and the suffix says who is asking.
+ */
 function userAgent(publicBaseUrl: string | undefined): string {
   const origin = publicOrigin(publicBaseUrl)
-  return `flood-monitor/0.1 (+${origin ? `${origin}/about` : 'https://github.com/chalaivate/flood-monitor'})`
+  return `${BROWSER_UA} (+${origin ? `${origin}/about` : 'https://github.com/chalaivate/flood-monitor'})`
 }
+
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/*;q=0.8'
+/** Redirects followed per upstream request, and only within the same origin. */
+const MAX_REDIRECTS = 2
 
 async function upstream(fetchImpl: typeof fetch, url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
   try {
-    // No Referer / Origin: we say who we are in the User-Agent instead.
-    return await fetchImpl(url, { ...init, redirect: 'error', referrerPolicy: 'no-referrer', signal })
+    // No Referer / Origin: we say who we are in the User-Agent instead. Redirects are followed
+    // by hand and only within the same origin, so the upstream host never changes.
+    let current = new URL(url)
+    for (let hop = 0; ; hop++) {
+      const res = await fetchImpl(current.href, { ...init, redirect: 'manual', referrerPolicy: 'no-referrer', signal })
+      if (res.status < 300 || res.status > 399 || res.status === 304) return res
+      await res.body?.cancel().catch(() => undefined)
+      const location = res.headers.get('location')
+      const next = location ? new URL(location, current) : null
+      if (!next || next.origin !== current.origin || hop >= MAX_REDIRECTS || (res.status !== 307 && res.status !== 308 && init.method && init.method !== 'GET')) {
+        throw new FrameError('unreachable', `HTTP ${res.status} redirect${next && next.origin !== current.origin ? ' to another host' : ''}`, { host: 'reached', status: res.status })
+      }
+      current = next
+    }
   } catch (err) {
+    if (err instanceof FrameError) throw err
     // A timeout means a slow answer, not a blocked host: a blocked host fails fast (refused,
     // reset, or undici's 10 s connect timeout, which is a TypeError). Anything else (DNS, TLS,
     // refused, reset, a redirect) is a host-level failure.
@@ -587,6 +659,7 @@ async function drain(res: Response): Promise<void> {
 
 interface RawFrame {
   bytes: Uint8Array
+  type: CctvImageType
   width: number | null
   height: number | null
   capturedAt: string | null
@@ -601,9 +674,9 @@ type Fetcher = (ref: string, policy: CctvSourcePolicy, deps: CctvFetchDeps, sign
 const fetchBmaFrame: Fetcher = async (ref, policy, deps, signal) => {
   if (!isPlausibleStreamRef(ref)) throw new FrameError('unreachable', 'invalid reference', { host: 'unknown' })
   const url = `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}`
-  const res = await upstream(deps.fetch, url, { headers: { 'User-Agent': userAgent(deps.publicBaseUrl), Accept: 'image/jpeg' } }, signal)
+  const res = await upstream(deps.fetch, url, { headers: { 'User-Agent': userAgent(deps.publicBaseUrl), Accept: IMAGE_ACCEPT } }, signal)
   if (!res.ok) throw await httpError(res, (deps.now ?? Date.now)())
-  const frame = validateJpeg(await readCapped(res, policy.maxBytes))
+  const frame = validateImage(await readCapped(res, policy.maxBytes))
   return { ...frame, capturedAt: null }
 }
 
@@ -636,7 +709,7 @@ const fetchDwrFrame: Fetcher = async (ref, policy, deps, signal) => {
   const img = await upstream(
     deps.fetch,
     `${DWR_API}/file/image/cctv`,
-    { method: 'POST', headers: { 'User-Agent': ua, Accept: 'image/jpeg', 'Content-Type': 'application/json' }, body: JSON.stringify({ path: value }) },
+    { method: 'POST', headers: { 'User-Agent': ua, Accept: IMAGE_ACCEPT, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: value }) },
     signal,
   )
   if (img.status === 404) {
@@ -646,7 +719,7 @@ const fetchDwrFrame: Fetcher = async (ref, policy, deps, signal) => {
   if (!img.ok) throw await httpError(img, now())
   const bytes = await readCapped(img, policy.maxBytes)
   if (bytes.byteLength === 0) throw new FrameError('no-image', 'empty image')
-  return { ...validateJpeg(bytes), capturedAt: dwrCaptureTime(value) }
+  return { ...validateImage(bytes), capturedAt: dwrCaptureTime(value) }
 }
 
 const FETCHERS: Record<UpstreamCameraSource, Fetcher> = {
@@ -770,6 +843,12 @@ export async function getCctvImage(source: UpstreamCameraSource, cameraId: strin
       } catch (err) {
         const t = now()
         s.fail.add(t)
+        const reason = err instanceof FrameError ? err.message : 'unexpected error'
+        s.lastFailure = { reason, at: t }
+        if ((s.failureLogged.get(reason) ?? 0) + FAILURE_LOG_MS <= t) {
+          s.failureLogged.set(reason, t)
+          log(`[cctv] ${source}: could not get a still: ${reason}`)
+        }
         // Answers still arriving after the source went off are not counted again.
         if (err instanceof FrameError && offFor(s, t) === null) noteFailure(source, s, err, t)
         throw err
@@ -788,7 +867,7 @@ export async function getCctvImage(source: UpstreamCameraSource, cameraId: strin
       state.hashes.delete(cameraId)
       state.hashes.set(cameraId, { hash, changedAt, seenAt: t })
       if (state.hashes.size > MAX_HASHES) state.hashes.delete(state.hashes.keys().next().value!)
-      return { bytes: raw.bytes, fetchedAt: t, capturedAt: raw.capturedAt, changedAt, width: raw.width, height: raw.height }
+      return { bytes: raw.bytes, type: raw.type, fetchedAt: t, capturedAt: raw.capturedAt, changedAt, width: raw.width, height: raw.height }
     } finally {
       s.gate.release()
     }
@@ -943,7 +1022,7 @@ export function cctvFrameResponse(frame: CctvFrame, stale: boolean, ttlMs: numbe
   const maxAge = stale ? 60 : Math.max(1, Math.ceil((frame.fetchedAt + ttlMs - now) / 1000))
   const headers: Record<string, string> = {
     ...CCTV_IMAGE_HEADERS,
-    'Content-Type': 'image/jpeg',
+    'Content-Type': frame.type ?? 'image/jpeg',
     'Content-Length': String(frame.bytes.byteLength),
     'Cache-Control': `public, max-age=${maxAge}`,
     'X-Cctv-Fetched-At': new Date(frame.fetchedAt).toISOString(),

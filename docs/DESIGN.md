@@ -102,17 +102,21 @@ demand and never influence status.
   | | `bma-floodcam` | `dwr-cctv` |
   |---|---|---|
   | Fresh / fail / stale max | 60 s / 60 s / 15 min | 5 min / 60 s / 60 min |
-  | Timeout | 20 s | 20 s for both steps together |
+  | Timeout | 25 s | 20 s for both steps together |
   | In flight (source queue) | 3 (20) | 2 (10) |
   | Hourly upstream budget (per process) | 600 | 240 |
 
-  Queue wait is 15 s in total (client line + source queue); the server's worst case is 35 s, below
+  Queue wait is 15 s in total (client line + source queue); the server's worst case is 40 s, below
   the client's 50 s watchdog. **Per client** (only with a trusted client IP, see `TRUST_PROXY`):
   cache hits are free; a request that goes upstream takes one of 40 misses per 10 min per IP
   (IPv6 grouped by /64), at most 2 running or queued at once plus 6 waiting; beyond that 429
   `limited` (a still-valid older frame is served instead when there is one). Abandoned requests
   leave the queue at once (`req.signal`).
-  JPEG magic check, trim after the last `FF D9`, 2 MB cap, frozen-frame hash (`X-Cctv-Changed-At`).
+  Accepts JPEG (magic check, trim after the last `FF D9`), PNG (≥ 64×48, smaller = placeholder) and WebP;
+  same-origin redirects only (≤ 2); browser-style User-Agent with a `flood-monitor/0.1 (+…/about)` suffix;
+  2 MB cap, frozen-frame hash (`X-Cctv-Changed-At`). Health shows `lastFailure: { reason, at }` per
+  source (no camera ids); the log prints each failure reason once per 30 min. `npm run cctv:probe`
+  diagnoses the BMA frame proxy from the server's own network.
   Frames live in memory only (LRU ≈ 300) and are swept by age (never older than the stale max:
   15 min BMA, 60 min DWR); frame hashes (no image data) are forgotten after 2 h without a view.
   **Fallbacks:** a host that never got a frame for a source and is turned away 3 times in a row

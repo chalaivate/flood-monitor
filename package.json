@@ -20,7 +20,8 @@
     "test:watch": "vitest",
     "worker": "tsx worker/poll.ts",
     "worker:once": "tsx worker/poll.ts --once",
-    "vapid": "tsx worker/vapid.ts"
+    "vapid": "tsx worker/vapid.ts",
+    "cctv:probe": "tsx worker/cctv-probe.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans-thai": "^5.3.0",

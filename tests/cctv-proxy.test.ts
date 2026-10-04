@@ -128,17 +128,17 @@ describe('JPEG checks', () => {
 })
 
 describe('BMA flood-camera frames', () => {
-  it('builds the upstream URL server-side with an honest User-Agent, no Referer/Origin and no redirects', async () => {
+  it('builds the upstream URL server-side with a self-identifying browser User-Agent, no Referer/Origin, redirects by hand', async () => {
     const { fetch, calls } = fakeFetch(() => new Response(jpeg()))
     const res = await getCctvImage('bma-floodcam', CAM, REF, deps(fetch))
     expect(res.ok).toBe(true)
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe(`${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(REF)}`)
     expect(calls[0]!.url.startsWith('https://floodbangkok.bangkok.go.th/api/proxy?rtcUrl=')).toBe(true)
-    expect(calls[0]!.init.redirect).toBe('error')
+    expect(calls[0]!.init.redirect).toBe('manual')
     const h = new Headers(calls[0]!.init.headers)
-    expect(h.get('user-agent')).toBe('flood-monitor/0.1 (+https://flood.example.org/about)')
-    expect(h.get('accept')).toBe('image/jpeg')
+    expect(h.get('user-agent')).toMatch(/^Mozilla\/5\.0 .*flood-monitor\/0\.1 \(\+https:\/\/flood\.example\.org\/about\)$/)
+    expect(h.get('accept')).toMatch(/^image\/jpeg,image\/png,image\/webp/)
     expect(h.has('referer')).toBe(false)
     expect(h.has('origin')).toBe(false)
   })
@@ -319,7 +319,7 @@ describe('DWR river-camera frames', () => {
     ])
     expect(calls[1]!.init.method).toBe('POST')
     expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ path: '/TA100220/2026/10/4/10_15.jpg' })
-    expect(calls.every((c) => c.init.redirect === 'error')).toBe(true)
+    expect(calls.every((c) => c.init.redirect === 'manual')).toBe(true)
   })
 
   it('reports no-image when DWR has no still, and refuses odd paths without a second request', async () => {
@@ -342,7 +342,7 @@ describe('DWR river-camera frames', () => {
 
 describe('image responses', () => {
   it('sets cache, freshness and safety headers', async () => {
-    const frame = { bytes: jpeg(), fetchedAt: t - 20_000, capturedAt: '2026-10-04T02:45:00.000Z', changedAt: t - 600_000, width: 352, height: 288 }
+    const frame = { bytes: jpeg(), type: 'image/jpeg' as const, fetchedAt: t - 20_000, capturedAt: '2026-10-04T02:45:00.000Z', changedAt: t - 600_000, width: 352, height: 288 }
     const res = cctvFrameResponse(frame, false, 60_000, t)
     expect(res.headers.get('content-type')).toBe('image/jpeg')
     expect(res.headers.get('cache-control')).toBe('public, max-age=40')
@@ -859,5 +859,54 @@ describe('startup warnings', () => {
       resetConfigCache()
       __resetCctvWarningsForTests()
     }
+  })
+})
+
+describe('upstream answers seen on real hosts', () => {
+  it('follows a same-origin redirect, never one to another host', async () => {
+    const same = fakeFetch((url, _i, n) =>
+      n === 1 ? new Response(null, { status: 302, headers: { location: '/api/proxy/?rtcUrl=x' } }) : new Response(jpeg()),
+    )
+    expect((await getCctvImage('bma-floodcam', CAM, REF, deps(same.fetch))).ok).toBe(true)
+    expect(same.calls[1]!.url).toBe('https://floodbangkok.bangkok.go.th/api/proxy/?rtcUrl=x')
+    clearCctvCache()
+    const away = fakeFetch(() => new Response(null, { status: 302, headers: { location: 'http://10.0.0.5/internal' } }))
+    expect(await getCctvImage('bma-floodcam', 'bma-floodcam:9', REF, deps(away.fetch))).toEqual({ ok: false, failure: 'unreachable' })
+    expect(away.calls).toHaveLength(1)
+    const { cctvImageStats } = await import('@/lib/server/cctv-proxy')
+    expect(cctvImageStats('bma-floodcam', t).lastFailure?.reason).toBe('HTTP 302 redirect to another host')
+  })
+
+  it('accepts PNG and WebP stills with the right content type, and treats tiny pictures as placeholders', async () => {
+    const { validateImage } = await import('@/lib/server/cctv-proxy')
+    const png = (w: number, h: number) => {
+      const b = new Uint8Array(64)
+      b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52])
+      new DataView(b.buffer).setUint32(16, w)
+      new DataView(b.buffer).setUint32(20, h)
+      return b
+    }
+    expect(validateImage(png(640, 360))).toMatchObject({ type: 'image/png', width: 640, height: 360 })
+    expect(() => validateImage(png(1, 1))).toThrow(/placeholder/)
+    const webp = new Uint8Array(2048)
+    webp.set(new TextEncoder().encode('RIFF'), 0)
+    webp.set(new TextEncoder().encode('WEBPVP8 '), 8)
+    expect(validateImage(webp).type).toBe('image/webp')
+    expect(() => validateImage(new TextEncoder().encode('<!DOCTYPE html><html>challenge</html>'))).toThrow(/not an image/)
+
+    const f = fakeFetch(() => new Response(png(640, 360), { headers: { 'content-type': 'image/png' } }))
+    const res = await getCctvImage('bma-floodcam', CAM, REF, deps(f.fetch))
+    expect(res.ok && res.frame.type).toBe('image/png')
+    expect(res.ok && cctvFrameResponse(res.frame, false, 60_000, t).headers.get('content-type')).toBe('image/png')
+  })
+
+  it('reports why the latest still failed, without camera ids, and logs each reason once', async () => {
+    const { cctvImageStats } = await import('@/lib/server/cctv-proxy')
+    const f = fakeFetch(() => new Response('nope', { status: 500 }))
+    await getCctvImage('bma-floodcam', 'bma-floodcam:1', REF, deps(f.fetch))
+    const stats = cctvImageStats('bma-floodcam', t)
+    expect(stats.lastFailure).toEqual({ reason: 'HTTP 500', at: new Date(t).toISOString() })
+    expect(JSON.stringify(stats)).not.toContain('bma-floodcam:1')
+    expect(JSON.stringify(stats)).not.toContain('example.invalid')
   })
 })

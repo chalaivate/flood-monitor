@@ -33,6 +33,7 @@ interface CameraHealth {
    */
   frames1h: (Omit<CctvSourceStats['frames1h'], 'budgetLeft'> & { budget: CctvSourceStats['budget'] }) | null
   lastFrame: CctvSourceStats['lastFrame']
+  lastFailure: CctvSourceStats['lastFailure']
 }
 
 /** Upstream messages must never carry stream addresses or credentials into a public response. */
@@ -66,6 +67,7 @@ async function cameraHealth(store: Store, config: AppConfig): Promise<CameraHeal
           imagesUntil: a.until !== null ? new Date(a.until).toISOString() : null,
           frames1h: stats ? { ok: stats.frames1h.ok, fail: stats.frames1h.fail, refused: stats.frames1h.refused, budget: stats.budget } : null,
           lastFrame: stats?.lastFrame ?? null,
+          lastFailure: stats?.lastFailure ?? null,
         }
       }),
     )
