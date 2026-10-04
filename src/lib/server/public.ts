@@ -1,4 +1,4 @@
-import type { Channel, Level, Place, SourceId, StationKind } from '../types'
+import type { Camera, CameraSourceId, Channel, Level, Place, SourceId, StationKind } from '../types'
 
 // Public (API response) shapes. This file holds no runtime secrets and imports no
 // Node modules, so client components may `import type` from it.
@@ -136,4 +136,38 @@ export function toPublicChannel(channel: Channel): PublicChannel {
     ...(showCode ? { linkCode: channel.linkCode ?? null, linkExpiresAt: linkExpiry(channel.createdAt) } : {}),
     createdAt: channel.createdAt,
   }
+}
+
+// --- CCTV (GET /api/cctv/cameras) ------------------------------------------------------
+
+/** Camera as the UI sees it: never includes upstream references. */
+export interface PublicCamera extends Camera {
+  /** Distance from the requested point, km (null when no point was given). */
+  distanceKm: number | null
+  /** 'image' when this server can show the camera's still; otherwise link to the agency page. */
+  media: 'image' | 'link'
+  /** Same-origin still URL, e.g. `/api/cctv/image/bma-floodcam/123.jpg`; null for 'link'. */
+  imageUrl: string | null
+  /** Suggested refresh interval for an open viewer, seconds. */
+  refreshSec: number
+}
+
+/** Agency camera pages we only link to (no images through this server). */
+export interface CameraLinkOut {
+  id: string
+  /** Thai title, e.g. "กล้องจราจร กทม.". */
+  title: string
+  owner: string
+  url: string
+}
+
+export interface CamerasResponse {
+  generatedAt: string
+  /** When each enabled source's camera list was last refreshed (null = never). */
+  catalogAt: Partial<Record<CameraSourceId, string | null>>
+  /** Nearest first when lat/lng were given (within r km, at most n), else every camera. */
+  cameras: PublicCamera[]
+  /** Distance to the nearest camera outside the radius (lat/lng queries only). */
+  nearestOutsideKm: number | null
+  links: CameraLinkOut[]
 }

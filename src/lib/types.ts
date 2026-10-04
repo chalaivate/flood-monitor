@@ -311,3 +311,65 @@ export interface HistoryPoint {
   freeboard?: number | null
   rain24h?: number | null
 }
+
+// --- CCTV cameras -------------------------------------------------------------------
+// Cameras are not Stations: they carry no readings, status or alerts. Images are stills
+// fetched on demand through our proxy (never stored); they never influence status.
+
+export type CameraSourceId =
+  | 'bma-floodcam' // สำนักการระบายน้ำ กทม. — flood-watch cameras (floodbangkok), Thai IP only
+  | 'dwr-cctv' // กรมทรัพยากรน้ำ — river telemetry station cameras
+  | 'demo-cam' // DATA_MODE=fixture — simulated cameras with generated images
+
+export const CAMERA_SOURCE_IDS: readonly CameraSourceId[] = ['bma-floodcam', 'dwr-cctv', 'demo-cam']
+
+export interface Camera {
+  /** `${source}:${nativeId}` (same convention as station ids). */
+  id: string
+  source: CameraSourceId
+  /** Upstream id, sanitised to ^[A-Za-z0-9_-]{1,64}$. */
+  nativeId: string
+  /** Groups the angles of one site: `${source}:${lat.toFixed(5)},${lng.toFixed(5)}`. */
+  siteId: string
+  /** Thai display name without the internal code prefix, e.g. "ปากซอยงามวงศ์วาน 62". */
+  name: string
+  /** Agency code, e.g. "CM3-JJ-70-C2". */
+  code: string | null
+  /** e.g. "มุม 2" when the site has several cameras. */
+  angle: string | null
+  /** Thai agency name for attribution, e.g. "สำนักการระบายน้ำ กทม.". */
+  owner: string
+  lat: number
+  lng: number
+  /** What the camera looks at (best effort, from agency data or the name). */
+  facing: 'water' | 'road' | 'unknown'
+  /** Stations at the same spot (road:FL.* ≤ 50 m, canal/river ≤ 150 m), computed at catalogue time. */
+  nearStationIds: string[]
+  /** Official page where people can see this camera themselves. */
+  officialUrl: string
+  /** Upstream image cadence in minutes when known (DWR ≈ 15). */
+  cadenceMin: number | null
+}
+
+/**
+ * Server-only upstream reference used to fetch a camera's image (BMA LiveStream address,
+ * DWR station code). Never part of an API response, never logged, never relayed.
+ */
+export interface CameraRef {
+  cameraId: string
+  ref: string
+}
+
+/** One source's camera list as stored (public part only). */
+export interface CameraCatalog {
+  source: CameraSourceId
+  fetchedAt: string
+  cameras: Camera[]
+}
+
+/** What a camera catalogue adapter returns. */
+export interface CameraCatalogResult extends CameraCatalog {
+  refs: CameraRef[]
+  /** Non-fatal notes (skipped rows etc.). */
+  warnings: string[]
+}

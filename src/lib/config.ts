@@ -1,6 +1,6 @@
 import { isAbsolute, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import type { SourceId } from './types'
+import type { CameraSourceId, SourceId } from './types'
 
 // Server-side configuration from environment variables. Never import this from
 // client components: it reads secrets.
@@ -94,9 +94,23 @@ const schema = z.object({
    * from a proxy that overwrites it) or none. Unset: vercel on Vercel, otherwise none.
    */
   TRUST_PROXY: z.enum(TRUST_PROXY_VALUES).default('none'),
+  /**
+   * CCTV camera catalogues to load (comma separated: bma-floodcam, dwr-cctv), or "none".
+   * DATA_MODE=fixture always uses the simulated demo-cam source instead.
+   */
+  CCTV_SOURCES: z.string().default('bma-floodcam,dwr-cctv'),
+  /**
+   * 1 lets this server fetch camera stills on demand (shared cache, strict budgets) for the
+   * sources whose catalogue it fetched itself; 0 shows links to the agency pages only.
+   */
+  CCTV_IMAGES: z.enum(['0', '1']).default('1'),
+  /** Contact for privacy / takedown requests, shown on the about page. */
+  CONTACT_EMAIL: str(),
 })
 
-export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[] }
+export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[]; enabledCameraSources: CameraSourceId[] }
+
+const LIVE_CAMERA_SOURCES: CameraSourceId[] = ['bma-floodcam', 'dwr-cctv']
 
 let cached: AppConfig | null = null
 
@@ -161,7 +175,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     const unknown = requested.filter((s) => !ALL_SOURCES.includes(s as SourceId))
     if (unknown.length) warn(`[config] SOURCES: ignoring unknown ${unknown.join(', ')} (known: ${ALL_SOURCES.join(', ')})`)
   }
-  return { ...parsed, DATA_DIR, enabledSources }
+  const requestedCams = parsed.CCTV_SOURCES.split(',').map((s) => s.trim()).filter(Boolean)
+  const enabledCameraSources: CameraSourceId[] =
+    parsed.DATA_MODE === 'fixture' ? ['demo-cam'] : LIVE_CAMERA_SOURCES.filter((s) => requestedCams.includes(s))
+  const unknownCams = requestedCams.filter((s) => s !== 'none' && !LIVE_CAMERA_SOURCES.includes(s as CameraSourceId))
+  if (unknownCams.length) warn(`[config] CCTV_SOURCES: ignoring unknown ${unknownCams.join(', ')} (known: ${LIVE_CAMERA_SOURCES.join(', ')}, none)`)
+  return { ...parsed, DATA_DIR, enabledSources, enabledCameraSources }
 }
 
 export function getConfig(): AppConfig {
