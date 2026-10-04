@@ -1,0 +1,103 @@
+{
+ "_fixture_note": "RECONSTRUCTED from field names used by bkk-flood-map update-data.mjs:667-672 and thailand-water thaiwater.py:209-233; values copied from the BMA 2026-09-28 capture of the same gauges. Not a verbatim upstream body.",
+ "result": "OK",
+ "data": [
+  {
+   "canal_datetime": "2026-09-28 11:30",
+   "canal_value": 0.73,
+   "agency": {
+    "agency_name": {
+     "th": "สำนักการระบายน้ำ กรุงเทพมหานคร"
+    }
+   },
+   "geocode": {
+    "amphoe_name": {
+     "th": "ประเวศ"
+    },
+    "province_name": {
+     "th": "กรุงเทพมหานคร"
+    }
+   },
+   "station": {
+    "id": 120,
+    "canal_name": {
+     "th": "ประตูระบายน้ำ คลองประเวศบุรีรมย์ ตอนวัดกระทุ่มเสือปลา"
+    },
+    "canal_lat": 13.72396,
+    "canal_long": 100.68956,
+    "canal_oldcode": "WL.PWT.03",
+    "warning_level": 0.2,
+    "critical_level": 0.2,
+    "bank": 1.05
+   }
+  },
+  {
+   "canal_datetime": "2026-09-28 11:30",
+   "canal_value": 0.4,
+   "agency": {
+    "agency_name": {
+     "th": "สำนักการระบายน้ำ กรุงเทพมหานคร"
+    }
+   },
+   "geocode": {
+    "amphoe_name": {
+     "th": "บางกะปิ"
+    }
+   },
+   "station": {
+    "id": 77,
+    "canal_name": {
+     "th": "จุดวัดคลองแสนแสบ ตอนสำนักงานเขตบางกะปิ"
+    },
+    "canal_lat": 13.76509,
+    "canal_long": 100.64791,
+    "canal_oldcode": "WL.SSB.07",
+    "warning_level": 0.35,
+    "critical_level": 0.45,
+    "bank": 0.75
+   }
+  },
+  {
+   "canal_datetime": "2019-04-02 10:00",
+   "canal_value": 0.1,
+   "geocode": {
+    "amphoe_name": {
+     "th": "เมืองนนทบุรี"
+    }
+   },
+   "station": {
+    "id": 5,
+    "canal_name": {
+     "th": "คลองบางใหญ่"
+    },
+    "canal_lat": 13.86,
+    "canal_long": 100.48,
+    "canal_oldcode": "WL.NBI.01",
+    "warning_level": null,
+    "critical_level": null,
+    "bank": 0
+   }
+  },
+  {
+   "canal_datetime": "2026-09-28 11:30",
+   "canal_value": 999999,
+   "geocode": {
+    "amphoe_name": {
+     "th": "บางกะปิ"
+    }
+   },
+   "station": {
+    "id": 9,
+    "canal_name": {
+     "th": "คลองจั่น ตอนถนนโยธินพัฒนา"
+    },
+    "canal_lat": 13.80547,
+    "canal_long": 100.6226,
+    "canal_oldcode": "WL.KJN.02",
+    "warning_level": 0.3,
+    "critical_level": 0.4,
+    "bank": 0.9
+   }
+  }
+ ]
+}

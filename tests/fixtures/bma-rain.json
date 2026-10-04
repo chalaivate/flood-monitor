@@ -1,0 +1,72 @@
+[
+ {
+  "rain_code": "RF.LSI.03",
+  "rain_shortname": "จุดวัดศูนย์ราชการ-ถ.แจ้งวัฒนะ",
+  "rain_name": "จุดวัดศูนย์ราชการ-ถ.แจ้งวัฒนะ",
+  "district_name": "หลักสี่",
+  "latitude": 13.8921,
+  "longitude": 100.56383,
+  "site_timestamp": "/Date(1790848800000)/",
+  "rf15min": 18,
+  "rf1hr": 52.5,
+  "rf3hr": 52.5,
+  "rf24hr": 52.5,
+  "status": 1
+ },
+ {
+  "rain_code": "RF.TLC.01",
+  "rain_shortname": "สนข.ตลิ่งชัน",
+  "rain_name": "สนข.ตลิ่งชัน",
+  "district_name": "ตลิ่งชัน",
+  "latitude": 13.77663,
+  "longitude": 100.45653,
+  "site_timestamp": "/Date(1790848800000)/",
+  "rf15min": 2.5,
+  "rf1hr": 49,
+  "rf3hr": 87.5,
+  "rf24hr": 87.5,
+  "status": 1
+ },
+ {
+  "rain_code": "RF.TLC.03",
+  "rain_shortname": "ส.คลองชักพระ",
+  "rain_name": "ส.คลองชักพระ",
+  "district_name": "ตลิ่งชัน",
+  "latitude": 13.77892,
+  "longitude": 100.465,
+  "site_timestamp": "/Date(1790848800000)/",
+  "rf15min": 2,
+  "rf1hr": 48,
+  "rf3hr": 92,
+  "rf24hr": 92,
+  "status": 1
+ },
+ {
+  "rain_code": "RF.KTY.01",
+  "rain_shortname": "สนข.คลองเตย",
+  "rain_name": "สนข.คลองเตย",
+  "district_name": "คลองเตย",
+  "latitude": 13.70791,
+  "longitude": 100.58363,
+  "site_timestamp": "/Date(1790848800000)/",
+  "rf15min": 0,
+  "rf1hr": 0,
+  "rf3hr": 2.5,
+  "rf24hr": 2.5,
+  "status": 1
+ },
+ {
+  "rain_code": "RF.PYT.02",
+  "rain_shortname": "ค.สามเสน ถ.พระราม 6",
+  "rain_name": "ค.สามเสน ถ.พระราม 6",
+  "district_name": "พญาไท",
+  "latitude": 13.77292,
+  "longitude": 100.52991,
+  "site_timestamp": "/Date(1771650300000)/",
+  "rf15min": 0,
+  "rf1hr": 0,
+  "rf3hr": 0,
+  "rf24hr": 0,
+  "status": 0
+ }
+]

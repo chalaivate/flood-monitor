@@ -1,0 +1,25 @@
+{
+  "name": "เฝ้าระวังน้ำท่วม",
+  "short_name": "น้ำท่วม",
+  "description": "ติดตามระดับน้ำคลอง ระยะห่างตลิ่ง ฝน และเรดาร์ฝนรอบบ้าน พร้อมแจ้งเตือนเมื่อสถานการณ์เปลี่ยน",
+  "lang": "th",
+  "dir": "ltr",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "categories": ["weather", "utilities"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "แผนที่จุดวัด", "short_name": "แผนที่", "url": "/map" },
+    { "name": "ตั้งค่าการแจ้งเตือน", "short_name": "แจ้งเตือน", "url": "/alerts" }
+  ]
+}

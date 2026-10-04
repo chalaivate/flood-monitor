@@ -1,0 +1,61 @@
+# Flood Monitor — all-in-one deployment for a machine in Thailand
+# (office PC, mini PC, NAS, Thai VPS). BMA data sources only answer Thai IPs.
+#
+#   cp .env.example .env        # then edit
+#   mkdir -p data && sudo chown 1000:1000 data   # the container runs as uid 1000
+#   docker compose up -d --build
+#   open http://localhost:3000
+#
+# Data (SQLite) lives in ./data. Back it up by copying the folder while the
+# container is stopped, or with `sqlite3 data/flood.db ".backup backup.db"`.
+#
+# Web Push keys without Node.js on the host (prints two lines for .env):
+#   docker compose run --rm --no-deps app node -e "const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\nVAPID_PRIVATE_KEY='+k.privateKey)"
+
+services:
+  app:
+    build: .
+    image: flood-monitor:latest
+    container_name: flood-monitor
+    env_file: .env
+    environment:
+      STORE: sqlite
+      DATA_DIR: /app/data
+      EMBEDDED_WORKER: "1"
+      # Graceful stop: the app waits up to 25 s for the poll cycle in flight
+      # (alerts are never cut off half-way). Must be a real env var, not in .env.
+      NEXT_MANUAL_SIG_HANDLE: "true"
+    # Longer than the app's 25 s shutdown wait, so Docker does not SIGKILL it first.
+    stop_grace_period: 30s
+    # A tiny init as PID 1 forwards signals and reaps child processes.
+    init: true
+    ports:
+      # Published on every interface so other machines on the LAN can open
+      # http://<this machine>:3000. That is safe with the default TRUST_PROXY=none.
+      #
+      # With the Cloudflare Tunnel below and TRUST_PROXY=cloudflare, do NOT publish
+      # the port to the network: anyone reaching :3000 directly could forge the
+      # CF-Connecting-IP header (fresh rate-limit buckets) and bypass Cloudflare
+      # Access/WAF. cloudflared reaches the app over the compose network
+      # (http://app:3000), so use loopback only, or remove `ports:` entirely:
+      #   - "127.0.0.1:3000:3000"
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # Optional: publish the dashboard on the internet without opening ports, via
+  # Cloudflare Tunnel. Create a tunnel in the Cloudflare Zero Trust dashboard,
+  # point its public hostname to http://app:3000, put the token in .env as
+  # CLOUDFLARE_TUNNEL_TOKEN, set PUBLIC_BASE_URL to that hostname and
+  # TRUST_PROXY=cloudflare, change the app's port to "127.0.0.1:3000:3000" (see
+  # above), then uncomment.
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - app
+  #   restart: unless-stopped

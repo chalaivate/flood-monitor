@@ -1,0 +1,59 @@
+{
+ "_fixture_note": "RECONSTRUCTED from field names used by bkk-flood-map update-data.mjs:656-664; values from the BMA relay capture of the same sensors. Not a verbatim upstream body.",
+ "data": [
+  {
+   "floodroad_datetime": "2026-09-28 11:50",
+   "floodroad_value": 44.6,
+   "geocode": {
+    "amphoe_name": {
+     "th": "วังทองหลาง"
+    }
+   },
+   "station": {
+    "id": 301,
+    "floodroad_name": {
+     "th": "ซ.ลาดพร้าว 122 (โรงแรมชารีน่า)"
+    },
+    "floodroad_lat": 13.76368,
+    "floodroad_long": 100.62394,
+    "floodroad_oldcode": "FL.WTL.04"
+   }
+  },
+  {
+   "floodroad_datetime": "2026-09-28 11:50",
+   "floodroad_value": 0,
+   "geocode": {
+    "amphoe_name": {
+     "th": "บางเขน"
+    }
+   },
+   "station": {
+    "id": 410,
+    "floodroad_name": {
+     "th": "อ.ทหารราบ 11 *"
+    },
+    "floodroad_lat": 13.85671,
+    "floodroad_long": 100.5892,
+    "floodroad_oldcode": "TN.BKA.01"
+   }
+  },
+  {
+   "floodroad_datetime": "2026-09-28 11:50",
+   "floodroad_value": null,
+   "geocode": {
+    "amphoe_name": {
+     "th": "สวนหลวง"
+    }
+   },
+   "station": {
+    "id": 302,
+    "floodroad_name": {
+     "th": "ถ.พัฒนาการ (แยกศรีนครินทร์)"
+    },
+    "floodroad_lat": 13.73602,
+    "floodroad_long": 100.63801,
+    "floodroad_oldcode": "FL.SLG.01"
+   }
+  }
+ ]
+}
