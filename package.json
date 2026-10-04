@@ -13,6 +13,7 @@
     "start": "next start",
     "postbuild": "node scripts/standalone-assets.mjs",
     "start:standalone": "node --env-file-if-exists=.env .next/standalone/server.js",
+    "demo": "node scripts/demo.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

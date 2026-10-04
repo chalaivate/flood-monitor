@@ -1,0 +1,16 @@
+{
+  // GitHub Codespaces / VS Code Dev Containers: builds once, then starts the demo
+  // (simulated data, clearly labelled) and opens port 3000 in the browser.
+  "name": "Flood Monitor (ข้อมูลสาธิต)",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22-bookworm",
+  "hostRequirements": { "cpus": 2, "memory": "4gb" },
+  "postCreateCommand": "npm ci && npm run build",
+  "postAttachCommand": "npm run demo",
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": { "label": "Flood Monitor", "onAutoForward": "openBrowser" }
+  },
+  "customizations": {
+    "vscode": { "extensions": ["dbaeumer.vscode-eslint"] }
+  }
+}
