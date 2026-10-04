@@ -403,3 +403,11 @@ describe('round 3 fixes', () => {
     expect(loadConfig({ DATA_DIR: '/var/lib/flood' }, { cwd }).DATA_DIR).toBe('/var/lib/flood')
   })
 })
+
+describe('cctv config', () => {
+  it('defaults camera stills off on Vercel (no shared cache or budget across instances)', () => {
+    expect(loadConfig({}, { cwd: '/srv/app' }).CCTV_IMAGES).toBe('1')
+    expect(loadConfig({ VERCEL: '1' }, { cwd: '/srv/app' }).CCTV_IMAGES).toBe('0')
+    expect(loadConfig({ VERCEL: '1', CCTV_IMAGES: '1' }, { cwd: '/srv/app' }).CCTV_IMAGES).toBe('1')
+  })
+})

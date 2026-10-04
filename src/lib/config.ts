@@ -102,6 +102,7 @@ const schema = z.object({
   /**
    * 1 lets this server fetch camera stills on demand (shared cache, strict budgets) for the
    * sources whose catalogue it fetched itself; 0 shows links to the agency pages only.
+   * Unset: 1, except on Vercel (0) — serverless instances share no cache or budget.
    */
   CCTV_IMAGES: z.enum(['0', '1']).default('1'),
   /** Contact for privacy / takedown requests, shown on the about page. */
@@ -159,6 +160,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     cleaned.DEFAULT_LABEL ??= DEMO_DEFAULT.DEFAULT_LABEL
   }
   cleaned.TRUST_PROXY = cleaned.TRUST_PROXY?.toLowerCase() || (env.VERCEL ? 'vercel' : 'none')
+  if (env.VERCEL && cleaned.CCTV_IMAGES === undefined) cleaned.CCTV_IMAGES = '0'
   const parsed = schema.parse(cleaned)
   for (const [key, [min, max]] of Object.entries(CONFIG_RANGES)) {
     const raw = cleaned[key]
