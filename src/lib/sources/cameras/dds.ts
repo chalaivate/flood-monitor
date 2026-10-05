@@ -20,8 +20,9 @@ import { siteIdFor } from './common'
 //   page instead of the camera map, the image URLs still answered, and the newest still was
 //   from 28 Aug (Last-Modified). The proxy passes Last-Modified on as the capture time, so the
 //   UI dims a still older than a day and shows its date.
-// Positions stay provisional (confidence on each row) until confirmed on site or by the page
-// (`npm run cctv:probe`). To correct a row, edit DDS_CAMERAS: a stored list is replaced within
+// Positions stay provisional (confidence on each row) until confirmed on site or by DDS itself;
+// the page's own pins cannot confirm them (wrong for 4 of 6), though `npm run cctv:probe` still
+// prints them to show whether the page changed. To correct a row, edit DDS_CAMERAS: a stored list is replaced within
 // refreshHours (a static list is never refused as "shrunk").
 
 export const DDS_ORIGIN = 'https://dds.bangkok.go.th'

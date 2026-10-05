@@ -68,7 +68,8 @@ function kind(b: Uint8Array): string {
   if (b[0] === 0xff && b[1] === 0xd8) return 'JPEG'
   if (b[0] === 0x89 && b[1] === 0x50) return 'PNG'
   if (String.fromCharCode(...b.slice(0, 4)) === 'RIFF') return 'RIFF/WebP'
-  const text = new TextDecoder().decode(b.slice(0, 200)).trim()
+  // Error bodies may echo the stream address the proxy was given: mask before printing.
+  const text = maskSecrets(new TextDecoder().decode(b.slice(0, 200)).trim())
   if (text.startsWith('#EXTM3U')) return `HLS playlist: ${JSON.stringify(text.slice(0, 120))}`
   if (text.startsWith('<')) return `HTML/markup: ${JSON.stringify(text.slice(0, 100))}`
   if (text.startsWith('{') || text.startsWith('[')) return `JSON: ${JSON.stringify(text.slice(0, 160))}`
@@ -106,7 +107,8 @@ const looksLikeToken = (t: string) => /\d/.test(t) || (/[a-z]/.test(t) && /[A-Z]
  * paths such as `cctv-image/cctv1.jpg` are kept.
  */
 function maskSecrets(s: string): string {
-  return maskQueries(s)
+  // Stream addresses (rtsp, rtmp, srt, ws) are reduced to their shape, like the BMA list.
+  return maskQueries(s.replace(/\b(?:rtsps?|rtmps?|srt|wss?):\/\/[^\s"'`<>]+/gi, (u) => shape(u)))
     .replace(/(\/\/)[^\s"'`<>/@]*@/g, '$1')
     .replace(/(\/\/)(?:\d{1,3}(?:\.\d{1,3}){3}|\[[\da-f:.]+\])/gi, '$1{ip}')
     .replace(/(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])/g, '{ip}')
@@ -678,7 +680,8 @@ function leafletMarkers(page: string): { total: number; markers: DdsMarker[] } {
     if (src) {
       try {
         const u = new URL(src, DDS_CCTV_PAGE)
-        if (u.origin === DDS_ORIGIN) imagePath = u.pathname
+        // By host name: an http:// src on the same host is the same image path.
+        if (u.hostname === new URL(DDS_ORIGIN).hostname) imagePath = u.pathname
       } catch {
         // not a URL
       }
@@ -778,8 +781,17 @@ async function ddsPage(): Promise<string> {
     console.log('  no cctv-image/ or cctv/ reference on the page')
     otherMedia(html, url)
   }
-  const mismatched = markers.markers.filter((m) => m.n !== null && m.imagePath !== (ddsCameraRow(String(m.n))?.imagePath ?? null)).length
-  const markerNote = markers.total ? `, ${markers.markers.length} map marker(s)${mismatched ? ` (${mismatched} with another image path than the app's table)` : ''}` : ''
+  const rowOf = (m: (typeof markers.markers)[number]) => (m.n === null ? undefined : ddsCameraRow(String(m.n)))
+  const mismatched = markers.markers.filter((m) => {
+    const row = rowOf(m)
+    return row !== undefined && m.imagePath !== row.imagePath
+  }).length
+  const notInTable = markers.markers.filter((m) => rowOf(m) === undefined).length
+  const markerNotes = [
+    mismatched ? `${mismatched} with another image path than the app's table` : '',
+    notInTable ? `${notInTable} not in the app's table` : '',
+  ].filter(Boolean)
+  const markerNote = markers.total ? `, ${markers.markers.length} map marker(s)${markerNotes.length ? ` (${markerNotes.join(', ')})` : ''}` : ''
   return `cctv.php HTTP ${r.res.status}${markerNote}, ${refs.total} image reference(s)`
 }
 
@@ -1147,7 +1159,7 @@ async function webApp() {
         let hits = 0
         while (i >= 0 && hits < 3) {
           const s = text.slice(Math.max(0, i - 220), i + 260).replace(/\s+/g, ' ')
-          snippets.add(`[${new URL(url).pathname.split('/').pop()} · ${k}] …${s}…`)
+          snippets.add(`[${new URL(url).pathname.split('/').pop()} · ${k}] …${maskSecrets(s)}…`)
           hits++
           i = text.indexOf(k, i + k.length)
         }

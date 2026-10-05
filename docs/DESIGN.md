@@ -74,8 +74,9 @@ demand and never influence status.
   daily, drifting to 03:00), `bma-ddscam` (DDS water-level cameras of `dds.bangkok.go.th/cctv.php`:
   a static table in `dds.ts`, no network, rebuilt daily on every host so a corrected row lands within
   a day, never relayed; labels and image paths from DDS's own map markers as captured by a third
-  party on 2026-09-28, whose pins are wrong for 4 of 6 cameras, so each camera sits at the BMA
-  station matched by name — confidence medium/low per row, see DATA-SOURCES.md),
+  party on 2026-09-28, whose pins are wrong for cameras 1, 4, 5 and 6; cameras 1 and 3–6 sit at the
+  BMA station matched by name and camera 2 (Phra Pinklao Bridge, no BMA station) keeps DDS's pin —
+  confidence medium/low per row, see DATA-SOURCES.md),
   `dwr-cctv` (DWR river telemetry cameras, central plains, weekly), `demo-cam` (fixture mode). The poll cycle refreshes due catalogues after ingest → alerts → prune
   (embedded worker and `worker/poll.ts` refresh every enabled source; `/api/cron/poll` only sources
   that are not Thai-IP-only). A failure never affects the cycle and keeps the last good list; a
@@ -120,8 +121,8 @@ demand and never influence status.
   untested. DDS `cctv-image/cctv1` and `cctv2` answered `image/jpeg` (cameras 3–6 untested); a third
   party reported on 2026-09-28 that the newest DDS still dated from 28 Aug (unverified) — the UI
   shows `Last-Modified` as the capture time and dims a still older than a day, with its date.
-  DDS images are Thai-IP only, but every host holds the refs: a host turned away (403 / challenge
-  page) switches to links by the host fallback below; a host that only times out keeps failing per
+  DDS images are Thai-IP only, but every host holds the refs: a host turned away (network error, 403 or
+  challenge page) switches to links by the host fallback below; a host that only times out keeps failing per
   request (drop `bma-ddscam` from `CCTV_SOURCES` or set `CCTV_IMAGES=0` there).
 
   Queue wait is 15 s in total (client line + source queue); the server's worst case is 40 s, below
