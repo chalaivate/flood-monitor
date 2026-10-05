@@ -133,7 +133,7 @@ describe('BMA flood-camera frames', () => {
     const res = await getCctvImage('bma-floodcam', CAM, REF, deps(fetch))
     expect(res.ok).toBe(true)
     expect(calls).toHaveLength(1)
-    expect(calls[0]!.url).toBe(`${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(REF)}`)
+    expect(calls[0]!.url).toBe(`${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(REF)}&timestamp=${t}`)
     expect(calls[0]!.url.startsWith('https://floodbangkok.bangkok.go.th/api/proxy?rtcUrl=')).toBe(true)
     expect(calls[0]!.init.redirect).toBe('manual')
     const h = new Headers(calls[0]!.init.headers)

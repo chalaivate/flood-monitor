@@ -680,7 +680,8 @@ type Fetcher = (ref: string, policy: CctvSourcePolicy, deps: CctvFetchDeps, sign
 
 const fetchBmaFrame: Fetcher = async (ref, policy, deps, signal) => {
   if (!isPlausibleStreamRef(ref)) throw new FrameError('unreachable', 'invalid reference', { host: 'unknown' })
-  const url = `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}`
+  // Same form as BMA's own page: the timestamp defeats caches between BMA and the camera.
+  const url = `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}&timestamp=${(deps.now ?? Date.now)()}`
   const res = await upstream(deps.fetch, url, { headers: { 'User-Agent': userAgent(deps.publicBaseUrl), Accept: IMAGE_ACCEPT } }, signal)
   if (!res.ok) throw await httpError(res, (deps.now ?? Date.now)())
   const frame = validateImage(await readCapped(res, policy.maxBytes))

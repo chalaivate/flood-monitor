@@ -275,7 +275,11 @@ describe('GET /api/cctv/image', () => {
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
     expect(res.headers.get('content-security-policy')).toBe("default-src 'none'")
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(jpeg())
-    expect(outbound).toEqual([`https://floodbangkok.bangkok.go.th/api/proxy?rtcUrl=${encodeURIComponent(BMA_REFS[0]!.ref)}`])
+    expect(outbound).toHaveLength(1)
+    const sent = new URL(outbound[0]!)
+    expect(`${sent.origin}${sent.pathname}`).toBe('https://floodbangkok.bangkok.go.th/api/proxy')
+    expect(sent.searchParams.get('rtcUrl')).toBe(BMA_REFS[0]!.ref)
+    expect(sent.searchParams.get('timestamp')).toMatch(/^\d+$/)
     // A second viewer is served from the shared cache.
     expect((await image('bma-floodcam', '101.jpg', '198.51.100.9')).status).toBe(200)
     expect(outbound).toHaveLength(1)

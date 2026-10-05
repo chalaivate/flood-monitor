@@ -4,14 +4,16 @@
 //    path template with camera-specific parts masked — never a full address).
 // 2. Asks BMA's frame proxy for a few cameras in a few request forms, and opens the stream
 //    address itself, printing status, type, size, first bytes and time.
-// 3. Reads the floodbangkok web app's own JavaScript and prints the code around "rtcUrl",
-//    "api/proxy", "LiveStream" etc., so we can see how BMA's own page loads a camera.
+// 3. Checks the DWR river cameras and the DDS canal cameras through the app's own proxy code.
+// 4. With --web: reads the floodbangkok web app's own JavaScript and prints the code around
+//    "rtcUrl", "api/proxy", "LiveStream" etc. (how BMA's own page loads a camera).
 // Paste the whole output when reporting a problem. Requests are sequential and bounded.
 import { BMA_FLOODCAM_LIST_URL, BMA_FLOODCAM_ORIGIN, parseBmaCameraProfile } from '../src/lib/sources/cameras/bma-floodcam'
 import { BROWSER_UA } from '../src/lib/sources/http'
-import { BMA_FLOODCAM_PROXY } from '../src/lib/server/cctv-proxy'
+import { BMA_FLOODCAM_PROXY, cctvImageStats, getCctvImage, type UpstreamCameraSource } from '../src/lib/server/cctv-proxy'
+import { DWR_LIST_URL } from '../src/lib/sources/cameras/dwr'
 
-const PROBE_VERSION = 2
+const PROBE_VERSION = 3
 const TIMEOUT_MS = 30_000
 const UA = `${BROWSER_UA} (+https://github.com/chalaivate/flood-monitor)`
 const MAX_SCRIPTS = 60
@@ -97,18 +99,72 @@ async function cameras() {
   console.log(`[probe] stream address shapes (masked):`)
   for (const [s, n] of [...shapes].sort((a, b) => b[1] - a[1]).slice(0, 8)) console.log(`  ×${n}  ${s}`)
 
+  // A browser session on BMA's own site (cookies), to see whether the proxy needs one.
+  let cookie = ''
+  try {
+    const home = await fetch(`${BMA_FLOODCAM_ORIGIN}/`, { headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(TIMEOUT_MS) })
+    await home.arrayBuffer()
+    cookie = home.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ')
+    console.log(`[probe] floodbangkok home: HTTP ${home.status}, ${cookie ? `${cookie.split(';').length} cookie(s)` : 'no cookies'}`)
+  } catch (err) {
+    console.log(`[probe] floodbangkok home: FAILED ${(err as Error).message}`)
+  }
+
   for (const cam of catalog.cameras.slice(0, 2)) {
     const ref = refs.get(cam.id)
     if (!ref) continue
     console.log(`\n[probe] camera ${cam.nativeId} "${cam.name}" (${shape(ref)})`)
-    const accept = { Accept: 'image/jpeg,image/png,image/webp,image/*;q=0.8' }
-    await attempt('proxy, encoded (what the server sends)', `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}`, { headers: accept })
-    await attempt('proxy, not encoded', `${BMA_FLOODCAM_PROXY}?rtcUrl=${ref}`, { headers: accept })
-    await attempt('proxy, with floodbangkok Referer (diagnostic only)', `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}`, {
-      headers: { ...accept, Referer: `${BMA_FLOODCAM_ORIGIN}/`, Origin: BMA_FLOODCAM_ORIGIN },
-    })
-    await attempt('stream address itself', ref, { headers: { Accept: '*/*' } })
+    const img = { Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' }
+    const url = `${BMA_FLOODCAM_PROXY}?rtcUrl=${encodeURIComponent(ref)}&timestamp=${Date.now()}`
+    await attempt('proxy exactly like BMA\'s page, no session', url, { headers: img })
+    if (cookie) {
+      await attempt('proxy exactly like BMA\'s page, with its session + Referer (diagnostic only)', url, {
+        headers: { ...img, Cookie: cookie, Referer: `${BMA_FLOODCAM_ORIGIN}/` },
+      })
+    }
+    await appPath('bma-floodcam', cam.id, ref)
   }
+}
+
+/** What the app's own image proxy gets for a camera (same code the server runs). */
+async function appPath(source: UpstreamCameraSource, cameraId: string, ref: string) {
+  const out = await getCctvImage(source, cameraId, ref, { fetch })
+  if (out.ok) {
+    const f = out.frame
+    console.log(`  app proxy: OK · ${f.type} · ${f.width ?? '?'}×${f.height ?? '?'} px · ${Math.round(f.bytes.byteLength / 1024)} KB${f.capturedAt ? ` · captured ${f.capturedAt}` : ''}`)
+  } else {
+    console.log(`  app proxy: ${out.failure} · last failure: ${cctvImageStats(source).lastFailure?.reason ?? '-'}`)
+  }
+}
+
+/** DWR river cameras: list, then the app's own proxy for two stations. */
+async function dwr() {
+  console.log(`\n[probe] DWR river cameras (telemetry.dwr.go.th):`)
+  try {
+    const res = await fetch(DWR_LIST_URL, {
+      method: 'POST',
+      headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paginate: { page: 1, pageSize: 30, orders: [] }, search: {} }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    })
+    console.log(`  list: HTTP ${res.status} ${res.headers.get('content-type') ?? ''}`)
+    if (!res.ok) return
+    const body = (await res.json()) as { value?: { results?: { entity?: { id?: unknown; stationCode?: unknown; cctvOnline?: unknown } }[] } }
+    const rows = (body.value?.results ?? []).map((r) => r.entity ?? {}).filter((e) => typeof e.id === 'string' && typeof e.stationCode === 'string')
+    console.log(`  ${rows.length} camera rows on page 1, ${rows.filter((e) => e.cctvOnline).length} marked online`)
+    for (const e of rows.filter((x) => x.cctvOnline).slice(0, 2)) {
+      console.log(`  station ${String(e.stationCode)}:`)
+      await appPath('dwr-cctv', `dwr-cctv:${String(e.stationCode)}`, String(e.id))
+    }
+  } catch (err) {
+    console.log(`  FAILED: ${(err as Error).message}`)
+  }
+}
+
+/** The 6 DDS canal water-level cameras (dds.bangkok.go.th/cctv.php), image path unverified. */
+async function dds() {
+  console.log(`\n[probe] DDS canal water-level cameras (dds.bangkok.go.th):`)
+  for (const n of [1, 2]) await attempt(`cctv${n}.jpg`, `https://dds.bangkok.go.th/cctv-image/cctv${n}.jpg?t=${Date.now()}`, { headers: { Accept: 'image/*' } })
 }
 
 /** Script URLs referenced by a page or a script (same origin only). */
@@ -183,7 +239,9 @@ async function webApp() {
 async function main() {
   console.log(`[probe v${PROBE_VERSION}] ${new Date().toISOString()} Node ${process.version}`)
   await cameras()
-  await webApp()
+  await dwr()
+  await dds()
+  if (process.argv.includes('--web')) await webApp()
 }
 
 main().catch((err) => {
