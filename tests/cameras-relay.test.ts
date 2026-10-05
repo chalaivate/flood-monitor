@@ -14,6 +14,8 @@ import {
 import { IngestPayloadSchema, parseRelayCameraCatalog } from '@/lib/server/validation'
 import { parseBmaRoadFlood } from '@/lib/sources/bma-misc'
 import { parseBmaCameraProfile } from '@/lib/sources/cameras/bma-floodcam'
+import { ddsCameraCatalog, ddsCamSource } from '@/lib/sources/cameras/dds'
+import { demoCamSource } from '@/lib/sources/cameras/demo'
 import type { CameraCatalogAdapter, CameraCatalogContext } from '@/lib/sources/cameras/types'
 import { DEMO_SOURCES } from '@/lib/sources/demo'
 import type { SourceAdapter } from '@/lib/sources/types'
@@ -101,6 +103,15 @@ const answerAll = (verdict: Record<string, unknown>): Answer => (body) => ({
 })
 
 describe('runRelayCycle with camera lists', () => {
+  it('never relays the static DDS table or the simulated set (every server builds those itself)', async () => {
+    const { fetch, posts, cameraPosts } = ingestStub()
+    const s = await runRelayCycle({ ...relayBase, fetch, now: () => T0, cameraSources: [ddsCamSource, demoCamSource], cameraState: createRelayCameraState() })
+    expect(s.ok).toBe(true)
+    expect(s.cameras).toEqual([])
+    expect(posts).toHaveLength(1) // readings only
+    expect(cameraPosts()).toEqual([])
+  })
+
   it('pushes the list when due, after the readings in a POST of its own, public fields only, and not again until the next period', async () => {
     const cams = cameraAdapter((_n, now) => bmaList(now))
     const state = createRelayCameraState()
@@ -464,6 +475,34 @@ describe('POST /api/ingest with camera lists', () => {
     expect(await loadCameraCatalogs(store, ['bma-floodcam'])).toEqual([])
     expect((await cameraCatalogHealth(store, ['dwr-cctv']))[0]!.lastError).toBe('relay: HTTP 403 from telemetry.dwr.go.th')
     log.mockRestore()
+  })
+
+  it('refuses a relayed DDS list even when the source is enabled here, and records no failure for it', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.env.CCTV_SOURCES = 'bma-floodcam,bma-ddscam,dwr-cctv'
+    resetConfigCache()
+    try {
+      const dds = ddsCameraCatalog(new Date())
+      const res = await post(
+        relayPayload({
+          cameraCatalogs: [{ source: 'bma-ddscam', fetchedAt: dds.fetchedAt, cameras: dds.cameras }, { source: 'bma-ddscam', fetchedAt: 'nope', cameras: [] }],
+          cameraFailures: [{ source: 'bma-ddscam', error: 'HTTP 403 from dds.bangkok.go.th' }],
+        }),
+      )
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { inserted: number; cameras: { source: string; saved: boolean; reason: string }[] }
+      expect(body.inserted).toBeGreaterThan(0)
+      expect(body.cameras).toEqual([
+        { source: 'bma-ddscam', saved: false, count: 0, warning: 'camera list not accepted from a relay (this server builds it itself)', reason: 'not-relayable' },
+        { source: 'bma-ddscam', saved: false, count: 0, warning: 'camera list not accepted from a relay (this server builds it itself)', reason: 'not-relayable' },
+      ])
+      expect(await loadCameraCatalogs(store, ['bma-ddscam'])).toEqual([])
+      expect(await cameraCatalogHealth(store, ['bma-ddscam'])).toEqual([{ source: 'bma-ddscam', catalogAt: null, count: 0, lastError: null }])
+    } finally {
+      process.env.CCTV_SOURCES = ENV.CCTV_SOURCES
+      resetConfigCache()
+      log.mockRestore()
+    }
   })
 
   it('ignores lists for sources this server has not enabled, and keeps a fetched-here list', async () => {

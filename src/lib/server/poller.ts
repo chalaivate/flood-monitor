@@ -1,6 +1,7 @@
 import { catalogDue, isCameraSourceId, publicCatalog, refreshCameraCatalogs, type CameraCatalogReport } from '../cameras/catalog'
 import type { AppConfig } from '../config'
 import { fetchPolitely, runAlerts, runIngest, type AlertReport, type CycleDeps, type IngestReport } from '../pipeline'
+import { RELAYABLE_CAMERA_SOURCES } from '../sources/cameras'
 import { redactSecrets } from '../sources/cameras/common'
 import type { CameraCatalogAdapter } from '../sources/cameras/types'
 import type { SourceAdapter } from '../sources/types'
@@ -290,7 +291,8 @@ export const RELAY_CAMERA_MAX_UNCONFIRMED = 6
 async function relayCameraCatalogs(opts: RelayOptions, now: Date): Promise<RelayCameraBatch> {
   const batch: RelayCameraBatch = { catalogs: [], failures: [], report: [] }
   const state = opts.cameraState ?? defaultRelayCameraState
-  const adapters = (opts.cameraSources ?? []).filter((a) => a.id !== 'demo-cam')
+  // Never the simulated set or the static DDS table (every server builds those itself).
+  const adapters = (opts.cameraSources ?? []).filter((a) => RELAYABLE_CAMERA_SOURCES.includes(a.id))
   await Promise.all(
     adapters.map(async (a) => {
       let st = state.get(a.id)

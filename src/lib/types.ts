@@ -318,10 +318,17 @@ export interface HistoryPoint {
 
 export type CameraSourceId =
   | 'bma-floodcam' // สำนักการระบายน้ำ กทม. — flood-watch cameras (floodbangkok), Thai IP only
+  | 'bma-ddscam' // สำนักการระบายน้ำ กทม. — water-level cameras (dds cctv.php), static table; images Thai IP only
   | 'dwr-cctv' // กรมทรัพยากรน้ำ — river telemetry station cameras
   | 'demo-cam' // DATA_MODE=fixture — simulated cameras with generated images
 
-export const CAMERA_SOURCE_IDS: readonly CameraSourceId[] = ['bma-floodcam', 'dwr-cctv', 'demo-cam']
+export const CAMERA_SOURCE_IDS: readonly CameraSourceId[] = ['bma-floodcam', 'bma-ddscam', 'dwr-cctv', 'demo-cam']
+
+/**
+ * Camera lists a Thai relay may push: lists fetched from an agency. Never the simulated set, nor
+ * the static DDS table (every server builds it itself and holds its own image references).
+ */
+export type RelayableCameraSourceId = Exclude<CameraSourceId, 'demo-cam' | 'bma-ddscam'>
 
 export interface Camera {
   /** `${source}:${nativeId}` (same convention as station ids). */
@@ -353,8 +360,8 @@ export interface Camera {
 
 /**
  * Server-only upstream reference used to fetch a camera's image (BMA LiveStream address,
- * DWR reportCctv snapshot id, demo station id). Never part of an API response, never logged,
- * never relayed.
+ * DDS image number, DWR reportCctv snapshot id, demo station id). Never part of an API response,
+ * never logged, never relayed.
  */
 export interface CameraRef {
   cameraId: string

@@ -377,11 +377,12 @@ describe('demo cameras (DATA_MODE=fixture)', () => {
 
 describe('camera source registry and helpers', () => {
   it('enables sources from CCTV_SOURCES; fixture mode uses only the demo', () => {
-    expect(getCameraSources(loadConfig({})).map((a) => a.id)).toEqual(['bma-floodcam', 'dwr-cctv'])
+    expect(getCameraSources(loadConfig({})).map((a) => a.id)).toEqual(['bma-floodcam', 'bma-ddscam', 'dwr-cctv'])
     expect(getCameraSources(loadConfig({ CCTV_SOURCES: 'dwr-cctv' })).map((a) => a.id)).toEqual(['dwr-cctv'])
+    expect(getCameraSources(loadConfig({ CCTV_SOURCES: 'bma-ddscam' })).map((a) => a.id)).toEqual(['bma-ddscam'])
     expect(getCameraSources(loadConfig({ CCTV_SOURCES: 'none' }))).toEqual([])
     expect(getCameraSources(loadConfig({ DATA_MODE: 'fixture' })).map((a) => a.id)).toEqual(['demo-cam'])
-    expect(Object.keys(CAMERA_ADAPTERS).sort()).toEqual(['bma-floodcam', 'demo-cam', 'dwr-cctv'])
+    expect(Object.keys(CAMERA_ADAPTERS).sort()).toEqual(['bma-ddscam', 'bma-floodcam', 'demo-cam', 'dwr-cctv'])
   })
 
   it('native ids, swapped points and secret redaction', () => {

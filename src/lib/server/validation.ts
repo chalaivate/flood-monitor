@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { isInThailand } from '../geo'
-import type { CameraCatalog, CameraSourceId, SourceId } from '../types'
+import type { CameraCatalog, RelayableCameraSourceId, SourceId } from '../types'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN } from '../types'
 
 // Request schemas. Messages are Thai because the UI shows `{ error }` verbatim.
@@ -182,12 +182,18 @@ export type IngestPayload = z.infer<typeof IngestPayloadSchema>
 
 // --- relayed camera catalogues ------------------------------------------------------
 
-// Simulated demo cameras are never relayed.
-const RELAY_CAMERA_SOURCE_SET: Record<Exclude<CameraSourceId, 'demo-cam'>, true> = {
+// Simulated demo cameras are never relayed, nor the static DDS table (every server builds it
+// itself and holds its own image references): lists of those sources fail validation.
+const RELAY_CAMERA_SOURCE_SET: Record<RelayableCameraSourceId, true> = {
   'bma-floodcam': true,
   'dwr-cctv': true,
 }
-const RELAY_CAMERA_SOURCES = Object.keys(RELAY_CAMERA_SOURCE_SET) as [CameraSourceId, ...CameraSourceId[]]
+export const RELAY_CAMERA_SOURCES = Object.keys(RELAY_CAMERA_SOURCE_SET) as [RelayableCameraSourceId, ...RelayableCameraSourceId[]]
+
+/** A camera source whose lists this server accepts from a relay. */
+export function isRelayCameraSource(v: unknown): v is RelayableCameraSourceId {
+  return typeof v === 'string' && Object.hasOwn(RELAY_CAMERA_SOURCE_SET, v)
+}
 
 /** Most cameras accepted in one relayed list (BMA has ~900). */
 export const MAX_RELAY_CAMERAS = 5000

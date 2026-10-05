@@ -62,6 +62,8 @@ export const demoCamSource: CameraCatalogAdapter = {
   thaiIpOnly: false,
   // Built once (or when missing): the simulated set never changes.
   refreshHours: Number.POSITIVE_INFINITY,
+  // Built from the demo tables in code: never partial.
+  staticList: true,
   async fetchCatalog(ctx) {
     return demoCameraCatalog(ctx.now)
   },

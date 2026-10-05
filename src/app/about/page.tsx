@@ -180,11 +180,11 @@ const CAMERA_SOURCES: { name: string; owner: string; url: string; host: string }
     url: 'https://floodbangkok.bangkok.go.th/',
     host: 'floodbangkok.bangkok.go.th',
   },
+  { name: 'กล้องระดับน้ำ', owner: 'สำนักการระบายน้ำ กรุงเทพมหานคร', url: 'https://dds.bangkok.go.th/cctv.php', host: 'dds.bangkok.go.th/cctv.php' },
   { name: 'กล้องสถานีโทรมาตรแม่น้ำ', owner: 'กรมทรัพยากรน้ำ', url: 'https://telemetry.dwr.go.th/reportCctv', host: 'telemetry.dwr.go.th' },
 ]
 
 const CAMERA_LINKS: { name: string; url: string; host: string }[] = [
-  { name: 'กล้องระดับน้ำ สำนักการระบายน้ำ', url: 'https://dds.bangkok.go.th/cctv.php', host: 'dds.bangkok.go.th/cctv.php' },
   { name: 'กล้องจราจร กทม.', url: 'http://www.bmatraffic.com/', host: 'bmatraffic.com' },
   { name: 'CCTV ลุ่มน้ำเจ้าพระยา กรมชลประทาน', url: 'https://wmsc.rid.go.th/cctv2/', host: 'wmsc.rid.go.th/cctv2' },
   { name: 'กล้องทางหลวง กรมทางหลวง', url: 'https://www.highwaytraffic.go.th/', host: 'highwaytraffic.go.th' },
@@ -202,7 +202,7 @@ function ExtLink({ href, children }: { href: string; children: ReactNode }) {
 function CameraSection({ demo, contactEmail, siteHost }: { demo: boolean; contactEmail: string | null; siteHost: string | null }) {
   return (
     <Section id="cctv" title="ภาพจากกล้อง CCTV">
-      <p>แอปนี้แสดงภาพนิ่งจากกล้องของหน่วยงานรัฐ เพื่อช่วยดูสภาพน้ำบนถนนและในแม่น้ำใกล้บ้าน ประกอบกับข้อมูลระดับน้ำ</p>
+      <p>แอปนี้แสดงภาพนิ่งจากกล้องของหน่วยงานรัฐ เพื่อช่วยดูสภาพน้ำบนถนน ในคลอง และในแม่น้ำใกล้บ้าน ประกอบกับข้อมูลระดับน้ำ</p>
       {demo && (
         <p className="rounded-xl border border-border bg-card-2 px-3 py-2 text-sm text-text">
           โหมดสาธิต: ภาพกล้องทั้งหมดเป็นภาพจำลองที่ระบบสร้างขึ้น ไม่ใช่ภาพจากกล้องจริง

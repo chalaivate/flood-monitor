@@ -4,6 +4,7 @@ import { getCameraRef, hasCameraRefs, isCameraSourceId, loadCameraCatalogs } fro
 import { haversineKm } from '../geo'
 import type { Store } from '../store/types'
 import type { Camera, CameraCatalog, CameraSourceId } from '../types'
+import { DDS_ORIGIN, ddsCameraRow } from '../sources/cameras/dds'
 import { BROWSER_UA } from '../sources/http'
 import { publicOrigin } from './http'
 import { ImageCache, NotAttemptedError, type CachePolicy } from './image-cache'
@@ -64,6 +65,18 @@ export const CCTV_POLICY: Record<UpstreamCameraSource, CctvSourcePolicy> = {
     hourlyBudget: 600,
     maxBytes: 2 * 1024 * 1024,
   },
+  // DDS water-level cameras: one static JPEG per camera, rewritten upstream (cadence unknown).
+  'bma-ddscam': {
+    ttlMs: 60_000,
+    failTtlMs: 60_000,
+    staleMaxMs: 15 * MIN,
+    timeoutMs: 15_000,
+    maxInFlight: 2,
+    maxQueue: 10,
+    queueWaitMs: 15_000,
+    hourlyBudget: 360,
+    maxBytes: 2 * 1024 * 1024,
+  },
   // DWR stations upload a still about every 15 minutes.
   'dwr-cctv': {
     ttlMs: 5 * MIN,
@@ -91,12 +104,15 @@ const CLIENT_LINE_RETRY_SEC = 15
 /** Suggested refresh interval of an open viewer (PublicCamera.refreshSec), seconds. */
 export const CCTV_REFRESH_SEC: Record<CameraSourceId, number> = {
   'bma-floodcam': 60,
+  'bma-ddscam': 60,
   'dwr-cctv': 300,
   'demo-cam': 60,
 }
 
 /** Fixed upstream endpoints. Nothing from the request ever becomes part of these URLs. */
 export const BMA_FLOODCAM_PROXY = 'https://floodbangkok.bangkok.go.th/api/proxy'
+/** DDS stills: this origin + the fixed `imagePath` of the camera's row in DDS_CAMERAS. */
+export { DDS_ORIGIN }
 export const DWR_API = 'https://telemetry.dwr.go.th/api'
 
 /** Most frames kept in memory at once (the least recently viewed camera is dropped first). */
@@ -125,7 +141,7 @@ export interface CctvFrame {
   type: CctvImageType
   /** When this server got the frame, epoch ms. */
   fetchedAt: number
-  /** Capture time stated by the agency (DWR snapshot path), ISO UTC; null when unknown. */
+  /** Capture time stated by the agency (DWR snapshot path, DDS Last-Modified), ISO UTC; null when unknown. */
   capturedAt: string | null
   /** When this exact picture was first seen, epoch ms (a frozen camera keeps an old value). */
   changedAt: number
@@ -328,6 +344,16 @@ export function dwrCaptureTime(path: string): string | null {
   const probe = new Date(Date.UTC(y, mo - 1, d))
   if (probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null
   return new Date(Date.UTC(y, mo - 1, d, h - 7, mi)).toISOString()
+}
+
+/** A DDS Last-Modified this far ahead of our clock is not believed. */
+const DDS_MAX_FUTURE_MS = 5 * MIN
+
+/** DDS still: its Last-Modified as the capture time, unless unparseable or more than 5 min ahead. */
+export function ddsCaptureTime(lastModified: string | null, now: number): string | null {
+  if (!lastModified) return null
+  const t = Date.parse(lastModified)
+  return Number.isFinite(t) && t <= now + DDS_MAX_FUTURE_MS ? new Date(t).toISOString() : null
 }
 
 /** A BMA LiveStream reference we are willing to hand to BMA's own proxy. */
@@ -730,8 +756,29 @@ const fetchDwrFrame: Fetcher = async (ref, policy, deps, signal) => {
   return { ...validateImage(bytes), capturedAt: dwrCaptureTime(value) }
 }
 
+const fetchDdsFrame: Fetcher = async (ref, policy, deps, signal) => {
+  // The ref only selects a row of the table in code and the URL takes that row's fixed path
+  // (the stills are not all in one directory): nothing from the store or the request becomes
+  // part of it.
+  const row = ddsCameraRow(ref)
+  if (!row) throw new FrameError('unreachable', 'invalid reference', { host: 'unknown' })
+  const now = deps.now ?? Date.now
+  // A static file per camera: the timestamp defeats caches between DDS and us.
+  const url = `${DDS_ORIGIN}${row.imagePath}?t=${now()}`
+  const res = await upstream(deps.fetch, url, { headers: { 'User-Agent': userAgent(deps.publicBaseUrl), Accept: IMAGE_ACCEPT } }, signal)
+  if (res.status === 404) {
+    await drain(res)
+    throw new FrameError('no-image', 'image not found')
+  }
+  if (!res.ok) throw await httpError(res, now())
+  const bytes = await readCapped(res, policy.maxBytes)
+  if (bytes.byteLength === 0) throw new FrameError('no-image', 'empty image')
+  return { ...validateImage(bytes), capturedAt: ddsCaptureTime(res.headers.get('last-modified'), now()) }
+}
+
 const FETCHERS: Record<UpstreamCameraSource, Fetcher> = {
   'bma-floodcam': fetchBmaFrame,
+  'bma-ddscam': fetchDdsFrame,
   'dwr-cctv': fetchDwrFrame,
 }
 
@@ -741,7 +788,7 @@ export type CctvImageOutcome =
   | { ok: false; failure: CctvFailure; retryAfterSec?: number }
 
 export function isUpstreamCameraSource(s: string): s is UpstreamCameraSource {
-  return s === 'bma-floodcam' || s === 'dwr-cctv'
+  return Object.hasOwn(FETCHERS, s)
 }
 
 /** Switch the source off from `t` for `ms` (logged once: failures while off are not counted). */
@@ -1087,6 +1134,7 @@ export const CAMERA_LINKS: CameraLinkOut[] = [
 /** Fallback official pages when a stored camera's officialUrl is not a plain http(s) link. */
 const SOURCE_PAGES: Record<CameraSourceId, string> = {
   'bma-floodcam': 'https://floodbangkok.bangkok.go.th/',
+  'bma-ddscam': 'https://dds.bangkok.go.th/cctv.php',
   'dwr-cctv': 'https://telemetry.dwr.go.th/reportCctv',
   'demo-cam': '/about',
 }

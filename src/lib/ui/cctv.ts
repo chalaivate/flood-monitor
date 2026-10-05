@@ -38,7 +38,7 @@ export const CCTV_OUTSIDE_TH = 'นอกรัศมี'
  */
 export const CCTV_LINKS_NOTE_TH = 'ดูกล้องเพิ่มเติมได้ที่เว็บของหน่วยงานโดยตรง (เปิดในแท็บใหม่)'
 
-/** "ภาพนิ่ง ... อัปเดตราวทุก 1–3 นาที" for cameras this server refreshes on demand (BMA, demo). */
+/** "ภาพนิ่ง ... อัปเดตราวทุก 1–3 นาที" for cameras this server refreshes on demand (BMA, DDS, demo). */
 const ON_DEMAND_CADENCE_TH = 'อัปเดตราวทุก 1–3 นาที'
 
 function cadenceTh(min: number): string {
@@ -136,7 +136,7 @@ export function retryAfterSec(v: string | null | undefined): number | null {
 export interface FrameMeta {
   /** When the server got the still (or, without that header, when we received it). */
   fetchedAt: number
-  /** Capture time stated by the agency (DWR), when known. */
+  /** Capture time stated by the agency (DWR's still path, DDS's Last-Modified), when known. */
   capturedAt: number | null
   /** When this exact picture was first seen (a frozen camera keeps an old value). */
   changedAt: number | null

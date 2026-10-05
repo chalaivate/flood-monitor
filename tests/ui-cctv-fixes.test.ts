@@ -438,11 +438,15 @@ describe('cctv-ui-08 + ui-09: /about retention promise and takedown contact', ()
     return renderToStaticMarkup(await AboutPage())
   }
 
-  it('states the same in-memory limits the server enforces (BMA 15 min, DWR 1 h)', async () => {
+  it('states the same in-memory limits the server enforces (BMA and DDS 15 min, DWR 1 h)', async () => {
     expect(CCTV_POLICY['bma-floodcam'].staleMaxMs).toBe(15 * MIN)
+    expect(CCTV_POLICY['bma-ddscam'].staleMaxMs).toBe(15 * MIN)
     expect(CCTV_POLICY['dwr-cctv'].staleMaxMs).toBe(60 * MIN)
     const html = await about()
     expect(html).toContain('ไม่เกิน 15 นาที (กล้องกรมทรัพยากรน้ำไม่เกิน 1 ชั่วโมง)')
+    // Every camera source with stills is credited, the DDS water-level cameras included.
+    expect(html).toContain('กล้องระดับน้ำ:</span> สำนักการระบายน้ำ กรุงเทพมหานคร')
+    expect(html).toContain('href="https://dds.bangkok.go.th/cctv.php"')
     // ui-15 on /about: road-flood status comes from depth, not freeboard.
     expect(html).toContain('สถานะและการแจ้งเตือนมาจากเซ็นเซอร์วัดน้ำ (ระยะห่างตลิ่งของคลองและแม่น้ำ หรือความลึกน้ำบนถนน) ไม่ได้มาจากภาพกล้อง')
   })

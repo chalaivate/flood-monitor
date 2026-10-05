@@ -53,7 +53,7 @@ Deployment modes (docs/DEPLOY.md):
 | `src/lib/sources/*` | One adapter per upstream (`SourceAdapter`), `index.ts` → `getSources(config)`. |
 | `src/lib/weather/*` | `getWeather(lat, lng)` (Open-Meteo, cached). |
 | `src/lib/radar.ts` | `radarImages()` list for the dashboard. |
-| `src/lib/sources/cameras/*` | CCTV camera catalogue adapters (`CameraCatalogAdapter`): `bma-floodcam`, `dwr-cctv`, `demo-cam`. |
+| `src/lib/sources/cameras/*` | CCTV camera catalogue adapters (`CameraCatalogAdapter`): `bma-floodcam`, `bma-ddscam`, `dwr-cctv`, `demo-cam`. |
 | `src/lib/cameras/*` | Camera catalogues in Store meta (public list + server-only refs), refresh scheduling, station join. |
 | `src/lib/server/cctv-proxy.ts`, `image-cache.ts`, `cctv-demo-image.ts` | On-demand camera stills: allowlist, shared cache, budgets; demo SVG. |
 | `src/lib/store/*` | `Store` interface, `SqliteStore`, `SupabaseStore`, `index.ts` → `getStore()`. |
@@ -71,8 +71,12 @@ demand and never influence status.
 
 - **Catalogues** (`src/lib/sources/cameras/*` → `src/lib/cameras/catalog.ts`):
   `bma-floodcam` (DDS flood-watch cameras, `floodbangkok…/items/camera_profile`, Thai IP only,
-  daily, drifting to 03:00), `dwr-cctv` (DWR river telemetry cameras, central plains, weekly),
-  `demo-cam` (fixture mode). The poll cycle refreshes due catalogues after ingest → alerts → prune
+  daily, drifting to 03:00), `bma-ddscam` (DDS water-level cameras of `dds.bangkok.go.th/cctv.php`:
+  a static table in `dds.ts`, no network, rebuilt daily on every host so a corrected row lands within
+  a day, never relayed; labels and image paths from DDS's own map markers as captured by a third
+  party on 2026-09-28, whose pins are wrong for 4 of 6 cameras, so each camera sits at the BMA
+  station matched by name — confidence medium/low per row, see DATA-SOURCES.md),
+  `dwr-cctv` (DWR river telemetry cameras, central plains, weekly), `demo-cam` (fixture mode). The poll cycle refreshes due catalogues after ingest → alerts → prune
   (embedded worker and `worker/poll.ts` refresh every enabled source; `/api/cron/poll` only sources
   that are not Thai-IP-only). A failure never affects the cycle and keeps the last good list; a
   shutdown abort is not a failure; the 120 s deadline is. Failures of Thai-IP-only sources are
@@ -81,13 +85,16 @@ demand and never influence status.
   fails keeps the camera's last known position; the refresh fails if more than max(2, 10%) lookups
   fail with no known position.
 - **Storage** (Store meta, per source): `cctv:catalog:<src>` public list, `cctv:refs:<src>`
-  server-only upstream references (BMA stream address, DWR snapshot id — never in an API
-  response, log or relay), `cctv:index:<src>` (commit point), `cctv:status:<src>` (refresh
+  server-only upstream references (BMA stream address, DDS image number, DWR snapshot id — never
+  in an API response, log or relay), `cctv:index:<src>` (commit point), `cctv:status:<src>` (refresh
   bookkeeping). A list under 50% of the previous size is refused until it repeats in ≥ 3 distinct
-  fetches over ≥ 24 h (relayed lists too). `nearStationIds` (road ≤ 50 m, canal/river ≤ 150 m) is
-  computed at save time.
+  fetches over ≥ 24 h (relayed lists too), except from an adapter with `staticList` (a table in
+  code, never partial: `bma-ddscam`, `demo-cam`), whose list is saved as is. `nearStationIds`
+  (road ≤ 50 m, canal/river ≤ 150 m) is computed at save time, plus the stations an adapter pins
+  (`pinnedStationIds`, the DDS table) at any distance when they exist.
 - **Relay**: readings are POSTed first; camera lists follow in their own POST to `/api/ingest`
-  (`results: []`, `cameraCatalogs` with public fields only, zod-validated, ≤ 5 lists / 5000 cameras).
+  (`results: []`, `cameraCatalogs` with public fields only, zod-validated, ≤ 5 lists / 5000 cameras;
+  `bma-floodcam` and `dwr-cctv` only — `bma-ddscam`/`demo-cam` lists are answered `not-relayable`).
   Each `cameras[i]` answer carries `saved`, `count`, `warning` and on refusal `reason`/`retry`; the
   relay resends an unconfirmed list up to 6 times, then refetches with backoff. A relayed list drops
   this host's refs, so that source is link-only here, and a relayed Thai-only list is only ever
@@ -99,12 +106,23 @@ demand and never influence status.
   (limits and caches are per process — per warm instance on serverless, which is why Vercel
   defaults to `CCTV_IMAGES=0`).
 
-  | | `bma-floodcam` | `dwr-cctv` |
-  |---|---|---|
-  | Fresh / fail / stale max | 60 s / 60 s / 15 min | 5 min / 60 s / 60 min |
-  | Timeout | 25 s | 20 s for both steps together |
-  | In flight (source queue) | 3 (20) | 2 (10) |
-  | Hourly upstream budget (per process) | 600 | 240 |
+  | | `bma-floodcam` | `bma-ddscam` | `dwr-cctv` |
+  |---|---|---|---|
+  | Upstream request | `GET floodbangkok…/api/proxy?rtcUrl=<ref>&timestamp=<ms>` | `GET dds.bangkok.go.th<imagePath>?t=<ms>`: the fixed path of the table row whose number is the ref (`/cctv-image/cctv<n>.jpg`, camera 3 `/cctv/cctv3.jpg`); an unknown ref makes no request | snapshot path, then `POST …/api/file/image/cctv` |
+  | Capture time | — | `Last-Modified` (ignored when > 5 min ahead) | from the snapshot path |
+  | Fresh / fail / stale max | 60 s / 60 s / 15 min | 60 s / 60 s / 15 min | 5 min / 60 s / 60 min |
+  | Timeout | 25 s | 15 s | 20 s for both steps together |
+  | In flight (source queue) | 3 (20) | 2 (10) | 2 (10) |
+  | Hourly upstream budget (per process) | 600 | 360 | 240 |
+
+  As of 2026-10-06 (probe v3 from a Thai IP) BMA's floodcam proxy answered HTTP 500 for both cameras
+  tested (same stream host), even in BMA's own request form: an upstream fault; other stream hosts
+  untested. DDS `cctv-image/cctv1` and `cctv2` answered `image/jpeg` (cameras 3–6 untested); a third
+  party reported on 2026-09-28 that the newest DDS still dated from 28 Aug (unverified) — the UI
+  shows `Last-Modified` as the capture time and dims a still older than a day, with its date.
+  DDS images are Thai-IP only, but every host holds the refs: a host turned away (403 / challenge
+  page) switches to links by the host fallback below; a host that only times out keeps failing per
+  request (drop `bma-ddscam` from `CCTV_SOURCES` or set `CCTV_IMAGES=0` there).
 
   Queue wait is 15 s in total (client line + source queue); the server's worst case is 40 s, below
   the client's 50 s watchdog. **Per client** (only with a trusted client IP, see `TRUST_PROXY`):
@@ -116,9 +134,14 @@ demand and never influence status.
   same-origin redirects only (≤ 2); browser-style User-Agent with a `flood-monitor/0.1 (+…/about)` suffix;
   2 MB cap, frozen-frame hash (`X-Cctv-Changed-At`). Health shows `lastFailure: { reason, at }` per
   source (no camera ids); the log prints each failure reason once per 30 min. `npm run cctv:probe`
-  diagnoses the BMA frame proxy from the server's own network.
+  (v4) diagnoses each source from the server's own network, sequentially: BMA's frame proxy and
+  ours for one camera per stream host (≤ 10 hosts; `--bma` two), DWR through our proxy, DDS
+  (`cctv.php` markers or "no longer lists cameras", `cctv1..8.jpg` under both directories, our
+  proxy, then a 65 s re-check unless `--quick` or no image), the now.bangkok.go.th feed's structure,
+  and with `--web` floodbangkok's own JavaScript; it never prints cookies, credentials, stream
+  addresses, IP hosts or query values.
   Frames live in memory only (LRU ≈ 300) and are swept by age (never older than the stale max:
-  15 min BMA, 60 min DWR); frame hashes (no image data) are forgotten after 2 h without a view.
+  15 min BMA and DDS, 60 min DWR); frame hashes (no image data) are forgotten after 2 h without a view.
   **Fallbacks:** a host that never got a frame for a source and is turned away 3 times in a row
   (network error, 403 or an HTML/challenge page — not timeouts or 5xx) shows agency links for 30 min;
   an agency 429, or 403/503 with Retry-After, or three 403s in a row pauses the source for

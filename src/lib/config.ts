@@ -95,10 +95,10 @@ const schema = z.object({
    */
   TRUST_PROXY: z.enum(TRUST_PROXY_VALUES).default('none'),
   /**
-   * CCTV camera catalogues to load (comma separated: bma-floodcam, dwr-cctv), or "none".
-   * DATA_MODE=fixture always uses the simulated demo-cam source instead.
+   * CCTV camera catalogues to load (comma separated: bma-floodcam, bma-ddscam, dwr-cctv), or
+   * "none". DATA_MODE=fixture always uses the simulated demo-cam source instead.
    */
-  CCTV_SOURCES: z.string().default('bma-floodcam,dwr-cctv'),
+  CCTV_SOURCES: z.string().default('bma-floodcam,bma-ddscam,dwr-cctv'),
   /**
    * 1 lets this server fetch camera stills on demand (shared cache, strict budgets) for the
    * sources whose catalogue it fetched itself; 0 shows links to the agency pages only.
@@ -117,7 +117,7 @@ const schema = z.object({
 
 export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[]; enabledCameraSources: CameraSourceId[] }
 
-const LIVE_CAMERA_SOURCES: CameraSourceId[] = ['bma-floodcam', 'dwr-cctv']
+const LIVE_CAMERA_SOURCES: CameraSourceId[] = ['bma-floodcam', 'bma-ddscam', 'dwr-cctv']
 
 let cached: AppConfig | null = null
 

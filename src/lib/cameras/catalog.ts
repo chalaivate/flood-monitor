@@ -7,7 +7,7 @@ import type { CameraCatalogAdapter } from '../sources/cameras/types'
 import type { Store } from '../store/types'
 import { CAMERA_SOURCE_IDS } from '../types'
 import type { Camera, CameraCatalog, CameraCatalogResult, CameraRef, CameraSourceId, Station } from '../types'
-import { joinNearStations, stationJoinKey } from './join'
+import { joinNearStations, MAX_NEAR_STATIONS, stationJoinKey } from './join'
 
 // Camera catalogues: stored in Store meta (public part and server-only refs under separate
 // keys), refreshed by the poller when due, joined to nearby stations when saved.
@@ -19,8 +19,8 @@ import { joinNearStations, stationJoinKey } from './join'
 //                       last, so it is the commit point readers check before the big list
 //   cctv:status:<src>   refresh bookkeeping {lastAttemptAt, lastSuccessAt, lastError, failures, shrink,
 //                       hosts}; `hosts` keeps attempts per host for Thai-IP-only sources
-// Refs (BMA LiveStream addresses, DWR snapshot ids) never leave this module except through
-// getCameraRef(); they are never logged, relayed or put into an API response.
+// Refs (BMA LiveStream addresses, DDS image numbers, DWR snapshot ids) never leave this module
+// except through getCameraRef(); they are never logged, relayed or put into an API response.
 
 export const CATALOG_META_PREFIX = 'cctv:catalog:'
 export const REFS_META_PREFIX = 'cctv:refs:'
@@ -185,11 +185,13 @@ async function updateStatus(store: Store, source: CameraSourceId, fn: (s: Catalo
 
 const OFFICIAL_HOSTS: Record<CameraSourceId, string | null> = {
   'bma-floodcam': 'floodbangkok.bangkok.go.th',
+  'bma-ddscam': 'dds.bangkok.go.th',
   'dwr-cctv': 'telemetry.dwr.go.th',
   'demo-cam': null, // same-origin page
 }
 const DEFAULT_PAGES: Record<CameraSourceId, string> = {
   'bma-floodcam': 'https://floodbangkok.bangkok.go.th/',
+  'bma-ddscam': 'https://dds.bangkok.go.th/cctv.php',
   'dwr-cctv': 'https://telemetry.dwr.go.th/reportCctv',
   'demo-cam': '/about',
 }
@@ -363,6 +365,21 @@ export async function cameraCatalogHealth(
 
 // --- writing ---------------------------------------------------------------------------------
 
+/**
+ * Station join for one source: stations by distance, plus the ones the source's own table pins
+ * to a camera (DDS), first, when they exist in `stations`.
+ */
+function joinCameras(source: CameraSourceId, cameras: readonly Camera[], stations: readonly Station[]): Camera[] {
+  const joined = joinNearStations(cameras, stations)
+  const pinned = CAMERA_ADAPTERS[source]?.pinnedStationIds
+  if (!pinned) return joined
+  const known = new Set(stations.map((s) => s.id))
+  return joined.map((c) => {
+    const extra = pinned(c.nativeId).filter((id) => known.has(id) && !c.nearStationIds.includes(id))
+    return extra.length ? { ...c, nearStationIds: [...extra, ...c.nearStationIds].slice(0, MAX_NEAR_STATIONS) } : c
+  })
+}
+
 /** Why a list was not saved. */
 export type CatalogRefuseReason = 'invalid' | 'empty' | 'older' | 'local-fresh' | 'shrink'
 type RefuseReason = CatalogRefuseReason
@@ -383,6 +400,8 @@ interface WriteOptions {
   stations?: Station[]
   /** Status read before the write: a smaller list that kept coming back is accepted (see shrinkAccepted). */
   shrink?: CatalogStatus
+  /** The list is a table in code (CameraCatalogAdapter.staticList): never refused as shrunk. */
+  staticList?: boolean
   /** Extra status changes saved with a successful write. */
   onSaved?: (s: CatalogStatus) => CatalogStatus
 }
@@ -415,14 +434,15 @@ async function writeCatalog(store: Store, input: CameraCatalog | CameraCatalogRe
     if (Date.parse(fetchedAt) < Date.parse(prev.fetchedAt)) {
       return refuse('older', `${source}: list from ${fetchedAt} is older than the stored one`, n)
     }
-    const accepted = opts.shrink ? shrinkAccepted(opts.shrink, n, fetchedAt, now) : false
+    // The guard is for partial upstream answers; a list from code is complete by definition.
+    const accepted = opts.staticList || (opts.shrink ? shrinkAccepted(opts.shrink, n, fetchedAt, now) : false)
     if (!accepted && prev.count > 0 && n < prev.count * MIN_KEEP_RATIO) {
       return refuse('shrink', `${source}: only ${n} of ${prev.count} cameras (< 50%); kept the previous list until the smaller list repeats for ${SHRINK_ACCEPT_AFTER_H} h`, n)
     }
   }
 
   const stations = opts.stations ?? (await store.listStations())
-  const joined = joinNearStations(cameras, stations)
+  const joined = joinCameras(source, cameras, stations)
   const joinedAt = now.toISOString()
   // Refs first, then the list, then the index (the commit point readers check).
   if (local) {
@@ -502,7 +522,7 @@ async function rejoin(store: Store, source: CameraSourceId, index: CatalogIndex,
   const stored = await readJsonMeta<StoredCatalog>(store, CATALOG_META_PREFIX + source)
   if (!stored || !Array.isArray(stored.cameras) || stored.fetchedAt !== index.fetchedAt) return false
   const joinedAt = now.toISOString()
-  const cameras = joinNearStations(stored.cameras, stations)
+  const cameras = joinCameras(source, stored.cameras, stations)
   await store.setMeta(CATALOG_META_PREFIX + source, JSON.stringify({ ...stored, joinedAt, cameras } satisfies StoredCatalog))
   await store.setMeta(
     INDEX_META_PREFIX + source,
@@ -682,7 +702,8 @@ async function refreshOne(
     let written: WriteResult
     try {
       written = await writeCatalog(store, result, now, {
-        shrink: status,
+        // A static list skips the shrink guard and its bookkeeping (a saved list clears it).
+        ...(adapter.staticList ? { staticList: true } : { shrink: status }),
         stations: await stations(),
         onSaved: (s) => withAttempt(s, host, { lastAttemptAt: attemptedAt, failures: 0 }),
       })

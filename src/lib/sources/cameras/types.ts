@@ -19,5 +19,15 @@ export interface CameraCatalogAdapter {
   thaiIpOnly: boolean
   /** How often the list is refreshed, hours (camera lists change rarely). */
   refreshHours: number
+  /**
+   * The list is a table in code, never partial: a smaller list (a release that drops rows) is
+   * saved at once, without the shrink guard meant for partial upstream answers.
+   */
+  staticList?: boolean
   fetchCatalog(ctx: CameraCatalogContext): Promise<CameraCatalogResult>
+  /**
+   * Stations a camera is known to watch whatever the distance (a static table's own matches).
+   * The station join keeps them next to the ones it finds by distance, as long as they exist.
+   */
+  pinnedStationIds?(nativeId: string): readonly string[]
 }

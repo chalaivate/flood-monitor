@@ -5,6 +5,7 @@ import { renderDemoCameraSvg, DEMO_WATERMARK } from '@/lib/server/cctv-demo-imag
 import { CCTV_MSG, CCTV_POLICY, cctvImageStats, clearCctvCache, SOURCE_DOWN_MS } from '@/lib/server/cctv-proxy'
 import type { CamerasResponse } from '@/lib/server/public'
 import { LIMITS, rateLimiter } from '@/lib/server/rate-limit'
+import { ddsCameraCatalog } from '@/lib/sources/cameras/dds'
 import { demoCameraCatalog } from '@/lib/sources/cameras/demo'
 import { demoCanal, demoRoadFlood } from '@/lib/sources/demo'
 import { __setStoreForTests } from '@/lib/store'
@@ -132,6 +133,9 @@ function stubFetch() {
     if (url.startsWith('https://floodbangkok.bangkok.go.th/api/proxy?rtcUrl=')) return new Response(jpeg(), { headers: { 'content-type': 'image/jpeg' } })
     if (url.startsWith('https://telemetry.dwr.go.th/api/public/reportCctv/snapshot/')) return Response.json({ value: '/TA100220/2026/10/4/10_15.jpg' })
     if (url === 'https://telemetry.dwr.go.th/api/file/image/cctv') return new Response(jpeg(704, 576))
+    if (/^https:\/\/dds\.bangkok\.go\.th\/(cctv-image|cctv)\/cctv\d\.jpg\?t=\d+$/.test(url)) {
+      return new Response(jpeg(1280, 720), { headers: { 'content-type': 'image/jpeg', 'last-modified': 'Sun, 04 Oct 2026 03:10:00 GMT' } })
+    }
     throw new TypeError(`fetch failed (blocked in tests): ${url}`)
   })
 }
@@ -183,7 +187,8 @@ describe('GET /api/cctv/cameras', () => {
     expect(body.cameras).toHaveLength(BMA_CAMS.length + DWR_CAMS.length)
     expect(body.cameras.every((c) => c.distanceKm === null)).toBe(true)
     expect(body.nearestOutsideKm).toBeNull()
-    expect(body.catalogAt).toEqual({ 'bma-floodcam': FETCHED_AT, 'dwr-cctv': FETCHED_AT })
+    // bma-ddscam is enabled by default; its list is built by the poll cycle (none seeded here).
+    expect(body.catalogAt).toEqual({ 'bma-floodcam': FETCHED_AT, 'bma-ddscam': null, 'dwr-cctv': FETCHED_AT })
     expect(body.cameras.filter((c) => c.nearStationIds.includes('road:FL.TEST.01')).map((c) => c.nativeId)).toEqual(['101', '102', '103'])
     const c101 = body.cameras.find((c) => c.id === 'bma-floodcam:101')!
     expect(c101).toMatchObject({ media: 'image', imageUrl: '/api/cctv/image/bma-floodcam/101.jpg', refreshSec: 60, nearStationIds: ['road:FL.TEST.01'] })
@@ -294,6 +299,30 @@ describe('GET /api/cctv/image', () => {
       'https://telemetry.dwr.go.th/api/public/reportCctv/snapshot/0b8f5a2e-1111-4222-8333-944455556666',
       'https://telemetry.dwr.go.th/api/file/image/cctv',
     ])
+  })
+
+  it('serves DDS stills from the static table\'s paths, with Last-Modified as the capture time', async () => {
+    await saveCameraCatalog(store, ddsCameraCatalog(new Date(FETCHED_AT)))
+    const { body } = await cameras()
+    expect(body.cameras.filter((c) => c.source === 'bma-ddscam')).toHaveLength(6)
+    expect(body.cameras.find((c) => c.id === 'bma-ddscam:1')).toMatchObject({
+      media: 'image',
+      imageUrl: '/api/cctv/image/bma-ddscam/1.jpg',
+      refreshSec: 60,
+      officialUrl: 'https://dds.bangkok.go.th/cctv.php',
+      facing: 'water',
+    })
+    const res = await image('bma-ddscam', '1.jpg')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-cctv-captured-at')).toBe('2026-10-04T03:10:00.000Z')
+    expect(outbound).toHaveLength(1)
+    expect(outbound[0]).toMatch(/^https:\/\/dds\.bangkok\.go\.th\/cctv-image\/cctv1\.jpg\?t=\d+$/)
+    // Camera 3's still is in another directory on DDS's host.
+    expect((await image('bma-ddscam', '3.jpg')).status).toBe(200)
+    expect(outbound[1]).toMatch(/^https:\/\/dds\.bangkok\.go\.th\/cctv\/cctv3\.jpg\?t=\d+$/)
+    expect((await image('bma-ddscam', '7.jpg')).status).toBe(404)
+    await withEnv({ CCTV_SOURCES: 'bma-floodcam' }, async () => expect((await image('bma-ddscam', '1.jpg')).status).toBe(404))
+    expect(outbound).toHaveLength(2)
   })
 
   it('answers 404 without any upstream request for unknown, malformed or disabled sources and cameras', async () => {

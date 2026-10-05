@@ -7,7 +7,7 @@ import { serverDeps } from '@/lib/server/context'
 import { handler, json, jsonError, readJson } from '@/lib/server/http'
 import { log } from '@/lib/server/log'
 import { pruneOldReadings } from '@/lib/server/poller'
-import { IngestPayloadSchema, parseRelayCameraCatalog, RelayCameraFailureSchema, type IngestPayload } from '@/lib/server/validation'
+import { IngestPayloadSchema, isRelayCameraSource, parseRelayCameraCatalog, RelayCameraFailureSchema, type IngestPayload } from '@/lib/server/validation'
 import type { Store } from '@/lib/store/types'
 import type { SourceFetchResult } from '@/lib/types'
 
@@ -24,7 +24,7 @@ interface CameraIngestReport {
   saved: boolean
   count: number
   warning: string | null
-  /** Why it was refused ('shrink', 'older', 'local-fresh', 'invalid', 'empty', 'not-enabled'). */
+  /** Why it was refused ('shrink', 'older', 'local-fresh', 'invalid', 'empty', 'not-enabled', 'not-relayable'). */
   reason?: string
   /** true: a problem on this server (e.g. the store failed); the relay sends the list again. */
   retry?: boolean
@@ -35,9 +35,13 @@ async function ingestOneCatalog(store: Store, config: AppConfig, raw: unknown): 
   const claimed = (raw as { source?: unknown } | null)?.source
   const source = typeof claimed === 'string' ? claimed.slice(0, 40) : null
   try {
+    // The simulated set and the static DDS table are never relayed: every server builds them.
+    if (isCameraSourceId(source) && !isRelayCameraSource(source)) {
+      return { source, saved: false, count: 0, warning: 'camera list not accepted from a relay (this server builds it itself)', reason: 'not-relayable' }
+    }
     const parsed = parseRelayCameraCatalog(raw)
     if (!parsed.ok) {
-      if (isCameraSourceId(parsed.source) && parsed.source !== 'demo-cam' && config.enabledCameraSources.includes(parsed.source)) {
+      if (isRelayCameraSource(parsed.source) && config.enabledCameraSources.includes(parsed.source)) {
         await recordCameraCatalogFailure(store, parsed.source, `list refused: ${parsed.error}`).catch(() => undefined)
       }
       return { source: parsed.source, saved: false, count: 0, warning: parsed.error, reason: 'invalid' }
