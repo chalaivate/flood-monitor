@@ -437,6 +437,8 @@ interface SourceState {
   offReason: 'host-unreachable' | 'agency-backoff' | null
   /** Agency backoffs since the last good frame (doubles the pause when no Retry-After is given). */
   backoffs: number
+  /** HTTP 5xx answers in a row on a host that never gave a frame (the request form may be wrong). */
+  agencyErrorStreak: number
   /** Why the latest upstream attempt failed (no camera id, no reference), for health and the log. */
   lastFailure: { reason: string; at: number } | null
   /** reason → last time it was logged (one line per reason per FAILURE_LOG_MS). */
@@ -452,6 +454,10 @@ interface SourceState {
  * frames, the same count of 403 / HTML answers starts an agency backoff instead (BMA answers a
  * sporadic 403 even to Thai IPs, so one is not enough).
  */
+/** A host that never gave a frame and answers this many 5xx in a row is rested for a while. */
+export const AGENCY_ERROR_AFTER = 8
+export const AGENCY_ERROR_PAUSE_MS = 15 * 60_000
+
 /** One log line per failure reason per source this often. */
 const FAILURE_LOG_MS = 30 * 60_000
 
@@ -506,6 +512,7 @@ function sourceState(source: UpstreamCameraSource): SourceState {
       refusalStreak: 0,
       offUntil: 0,
       offReason: null,
+      agencyErrorStreak: 0,
       backoffs: 0,
       lastFailure: null,
       failureLogged: new Map(),
@@ -764,6 +771,12 @@ function noteFailure(source: UpstreamCameraSource, s: SourceState, err: FrameErr
     // The host answered: a camera-level failure says nothing about reaching it.
     s.blockedStreak = 0
     s.refusalStreak = 0
+    // But server errors for every camera on a host that never gave a frame mean the agency's
+    // service is down or no longer accepts this request: rest it and show agency links.
+    if (!s.everOk && err.status !== null && err.status >= 500 && ++s.agencyErrorStreak >= AGENCY_ERROR_AFTER) {
+      s.agencyErrorStreak = 0
+      goOff(source, s, 'agency-backoff', t, AGENCY_ERROR_PAUSE_MS, `HTTP ${err.status} ×${AGENCY_ERROR_AFTER}`)
+    }
     return
   }
   if (err.host !== 'refused' && err.host !== 'unreachable') return
@@ -859,6 +872,7 @@ export async function getCctvImage(source: UpstreamCameraSource, cameraId: strin
       s.blockedStreak = 0
       s.refusalStreak = 0
       s.backoffs = 0
+      s.agencyErrorStreak = 0
       if (!s.lastFrame) log(`[cctv] ${source}: first frame ${raw.width ?? '?'}×${raw.height ?? '?'} px, ${Math.round(raw.bytes.byteLength / 1024)} KB`)
       s.lastFrame = { width: raw.width, height: raw.height, bytes: raw.bytes.byteLength }
       const hash = createHash('sha1').update(raw.bytes).digest('hex')

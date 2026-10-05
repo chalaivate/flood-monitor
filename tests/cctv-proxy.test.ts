@@ -910,3 +910,19 @@ describe('upstream answers seen on real hosts', () => {
     expect(JSON.stringify(stats)).not.toContain('example.invalid')
   })
 })
+
+describe('agency errors on a host that never gave a frame', () => {
+  it('rests the source after 8 server errors in a row so the UI shows agency links', async () => {
+    const { AGENCY_ERROR_AFTER, cctvImageStats } = await import('@/lib/server/cctv-proxy')
+    const f = fakeFetch(() => new Response('{"error":"internal server error"}', { status: 500, headers: { 'content-type': 'application/json' } }))
+    for (let i = 0; i < AGENCY_ERROR_AFTER - 1; i++) {
+      expect(await getCctvImage('bma-floodcam', `bma-floodcam:${400 + i}`, REF, deps(f.fetch))).toEqual({ ok: false, failure: 'unreachable' })
+    }
+    const last = await getCctvImage('bma-floodcam', 'bma-floodcam:499', REF, deps(f.fetch))
+    expect(last).toMatchObject({ ok: false, failure: 'unavailable', retryAfterSec: 900 })
+    const calls = f.calls.length
+    expect(await getCctvImage('bma-floodcam', 'bma-floodcam:498', REF, deps(f.fetch))).toMatchObject({ ok: false, failure: 'unavailable' })
+    expect(f.calls.length).toBe(calls) // no upstream call while rested
+    expect(cctvImageStats('bma-floodcam', t).lastFailure?.reason).toBe('HTTP 500')
+  })
+})
