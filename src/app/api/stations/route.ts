@@ -4,6 +4,7 @@ import { handler, json } from '@/lib/server/http'
 import type { MapStation } from '@/lib/server/public'
 import { getStore } from '@/lib/store'
 import { DEFAULT_FREEBOARD, DEFAULT_RAIN } from '@/lib/types'
+import { ensureFreshData } from '@/lib/server/on-demand'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -11,6 +12,7 @@ export const dynamic = 'force-dynamic'
 /** GET /api/stations → { generatedAt, stations: MapStation[] } (levels use default thresholds). */
 export const GET = handler('stations', async () => {
   const config = getConfig()
+  await ensureFreshData()
   const store = await getStore()
   const now = new Date()
   const opts = { now, staleMinutes: config.STALE_MINUTES, freeboard: DEFAULT_FREEBOARD, rain: DEFAULT_RAIN }

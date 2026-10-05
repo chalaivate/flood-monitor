@@ -7,6 +7,7 @@ import { enforceClientLimit, LIMITS } from '@/lib/server/rate-limit'
 import { clamp, queryNumber } from '@/lib/server/validation'
 import { getStore } from '@/lib/store'
 import type { CameraSourceId } from '@/lib/types'
+import { ensureFreshData } from '@/lib/server/on-demand'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -22,6 +23,7 @@ export const dynamic = 'force-dynamic'
 export const GET = handler('cctv cameras', async (req: Request) => {
   enforceClientLimit('cctvCameras', clientIp(req), LIMITS.cctvCameras)
   const config = getConfig()
+  await ensureFreshData()
   const store = await getStore()
   const q = new URL(req.url).searchParams
 

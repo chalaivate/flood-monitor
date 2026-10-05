@@ -24,6 +24,8 @@ export const GET = handler('config/public', async () => {
       lineAddFriendUrl: channels.line ? (c.LINE_ADD_FRIEND_URL ?? null) : null,
       vapidPublicKey: channels.webpush ? (c.VAPID_PUBLIC_KEY ?? null) : null,
       rainviewer: c.RAINVIEWER === '1',
+      // Serverless with a per-instance SQLite store: places and alert settings are not kept.
+      ephemeral: c.INGEST_ON_REQUEST === '1' && c.STORE === 'sqlite',
     },
     { headers: { 'Cache-Control': 'public, max-age=300' } },
   )

@@ -107,6 +107,12 @@ const schema = z.object({
   CCTV_IMAGES: z.enum(['0', '1']).default('1'),
   /** Contact for privacy / takedown requests, shown on the about page. */
   CONTACT_EMAIL: str(),
+  /**
+   * 1 = no long-running poller and no shared store (serverless with SQLite): a request finding
+   * data older than POLL_MINUTES runs one poll cycle on this instance. Unset: 1 on Vercel with
+   * STORE=sqlite, otherwise 0.
+   */
+  INGEST_ON_REQUEST: z.enum(['0', '1']).default('0'),
 })
 
 export type AppConfig = z.infer<typeof schema> & { enabledSources: SourceId[]; enabledCameraSources: CameraSourceId[] }
@@ -160,7 +166,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     cleaned.DEFAULT_LABEL ??= DEMO_DEFAULT.DEFAULT_LABEL
   }
   cleaned.TRUST_PROXY = cleaned.TRUST_PROXY?.toLowerCase() || (env.VERCEL ? 'vercel' : 'none')
-  if (env.VERCEL && cleaned.CCTV_IMAGES === undefined) cleaned.CCTV_IMAGES = '0'
+  // Serverless instances share no cache or budget: no agency stills by default (demo images are local).
+  if (env.VERCEL && cleaned.CCTV_IMAGES === undefined && cleaned.DATA_MODE !== 'fixture') cleaned.CCTV_IMAGES = '0'
+  // Vercel functions can only write to /tmp, and with SQLite there each instance keeps its own data.
+  if (env.VERCEL && (cleaned.STORE ?? 'sqlite') === 'sqlite') {
+    cleaned.DATA_DIR ??= '/tmp/flood-monitor'
+    cleaned.INGEST_ON_REQUEST ??= '1'
+  }
   const parsed = schema.parse(cleaned)
   for (const [key, [min, max]] of Object.entries(CONFIG_RANGES)) {
     const raw = cleaned[key]

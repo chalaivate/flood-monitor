@@ -9,6 +9,7 @@ import { adHocPlace, loadSnapshot } from '@/lib/server/snapshot'
 import { clamp, queryNumber } from '@/lib/server/validation'
 import { weatherBudget } from '@/lib/server/weather-cache'
 import { getStore } from '@/lib/store'
+import { ensureFreshData } from '@/lib/server/on-demand'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -17,6 +18,7 @@ export const dynamic = 'force-dynamic'
 export const GET = handler('snapshot', async (req: Request) => {
   enforceClientLimit('snapshot', clientIp(req), LIMITS.snapshot)
   const config = getConfig()
+  await ensureFreshData()
   const store = await getStore()
   const q = new URL(req.url).searchParams
 

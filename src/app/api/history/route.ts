@@ -2,6 +2,7 @@ import { handler, HttpError, json } from '@/lib/server/http'
 import { clamp, queryNumber } from '@/lib/server/validation'
 import { getStore } from '@/lib/store'
 import type { HistoryPoint } from '@/lib/types'
+import { ensureFreshData } from '@/lib/server/on-demand'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -20,6 +21,7 @@ export const GET = handler('history', async (req: Request) => {
   if (hoursRaw !== undefined && !Number.isFinite(hoursRaw)) throw new HttpError(400, 'จำนวนชั่วโมงไม่ถูกต้อง')
   const hours = clamp(hoursRaw ?? 48, 1, MAX_HOURS)
 
+  await ensureFreshData()
   const store = await getStore()
   const since = new Date(Date.now() - hours * 3_600_000).toISOString()
   const raw = await store.history(ids, since)

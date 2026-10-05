@@ -921,6 +921,7 @@ describe('public read endpoints', () => {
       lineAddFriendUrl: 'https://lin.ee/abcdef',
       vapidPublicKey: null,
       rainviewer: true,
+      ephemeral: false,
     })
     expect(JSON.stringify(b)).not.toMatch(/secret|line-token|re_test/)
   })

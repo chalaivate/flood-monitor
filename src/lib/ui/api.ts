@@ -17,6 +17,8 @@ export interface PublicConfig {
   vapidPublicKey: string | null
   /** Animated RainViewer radar allowed (operator setting, licence-dependent). */
   rainviewer: boolean
+  /** This deployment does not keep places or alert settings (serverless demo). */
+  ephemeral: boolean
 }
 
 export type { CameraLinkOut, CamerasResponse, ChannelLink, MapStation, PublicCamera, PublicChannel, PublicPlace }

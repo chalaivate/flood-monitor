@@ -27,6 +27,19 @@
   แต่ codespace ที่หยุดแล้วยังกินพื้นที่ ลบได้ที่ github.com/codespaces
 - ถ้าลิงก์เปิดผิด branch: ในหน้า repo เลือก branch `claude/flood-early-warning` → Code → Codespaces → Create codespace
 
+**Vercel (ลิงก์สาธิตถาวร ไม่มีฐานข้อมูล):** import repo แล้วตั้ง Environment Variables เพียง
+```
+DATA_MODE=fixture
+PUBLIC_BASE_URL=https://<โดเมน>.vercel.app
+CRON_SECRET=<สุ่ม>      # ไม่ตั้งก็ได้ แต่ cron ใน vercel.json จะตอบ 503 ทุกรอบ
+```
+- เมื่อไม่ได้ตั้ง `STORE=supabase` ระบบใช้ SQLite ใน `/tmp` ของแต่ละ instance และ `INGEST_ON_REQUEST=1` อัตโนมัติ:
+  คำขอแรกของ instance ใหม่จะสร้างข้อมูลสาธิตก่อนตอบ (ราว 1 วินาที) แล้วสร้างใหม่ทุก `POLL_MINUTES`
+- **ไม่เก็บอะไรถาวร** — สถานที่และการตั้งค่าแจ้งเตือนหายเมื่อ instance ถูกปิด หน้าแจ้งเตือนจึงแสดงคำเตือนนี้
+  ใช้สำหรับให้คนลองหน้าจอเท่านั้น ใช้งานจริงให้ใช้แบบ A หรือ B
+- `DATA_MODE=live` บน Vercel แบบไม่มี Supabase ทำได้ แต่ดึงได้เฉพาะ ThaiWater (Vercel อยู่นอกไทย) และข้อมูลก็ไม่ถาวรเช่นกัน
+- ถ้าเปิดลิงก์แล้วเจอหน้าล็อกอิน Vercel: Project Settings → Deployment Protection → ปิด Vercel Authentication สำหรับ Production
+
 **ในเครื่อง (macOS / Linux / Windows):**
 
 ```bash

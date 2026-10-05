@@ -47,6 +47,7 @@ function normalise(c: PublicConfig): PublicConfig {
     lineAddFriendUrl: c?.lineAddFriendUrl ?? null,
     vapidPublicKey: c?.vapidPublicKey ?? null,
     rainviewer: c?.rainviewer !== false,
+    ephemeral: c?.ephemeral === true,
   }
 }
 
